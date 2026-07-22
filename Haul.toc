@@ -1,0 +1,47 @@
+## Interface: 120007
+## Title: Haul
+## Notes: Loot / gold-per-hour tracker. Per-item exclude-from-gold, collapsible bar, reload-to-sync.
+## Category: GEC
+## Author: Goblin Engineering Company
+## Version: 2026.07.21.14
+## X-GEC-Channel: public
+## SavedVariables: HaulDB, HaulState, HaulData, GECStoreDB
+## OptionalDeps: TradeSkillMaster, Auctionator
+## X-Category: Inventory
+
+CombatLogInit.lua
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\GECBind-1.0\GECBind-1.0.lua
+Libs\GECLoot-1.0\GECLoot-1.0.lua
+Libs\GECData-1.0\GECData-1.0.lua
+Libs\GECTheme-1.0\GECTheme-1.0.lua
+Libs\GECTheme-1.0\GECTheme-Box.lua
+Libs\GECReader-1.0\GECReader-1.0.lua
+Libs\GECMap-1.0\GECMap-1.0.lua
+Libs\GECStore-1.0\GECStore-1.0.lua
+Libs\GECStore-1.0\GECStore-Session.lua
+Libs\GECQuest-1.0\GECQuest-1.0.lua
+Libs\GECStoreView-1.0\GECStoreView-1.0.lua
+Libs\GECTemplate-1.0\GECTemplate-1.0.lua
+Libs\GECTemplate-1.0\GECTemplate-Resolvers.lua
+Libs\GECTemplate-1.0\GECTemplate-Bridge.lua
+Libs\GECTemplate-1.0\GECTemplate-Bridge-TSM.lua
+Libs\GECFeedBrowser-1.0\GECFeedBrowser-1.0.lua
+
+Durations.lua
+Core.lua
+Replay.lua
+Log.lua
+Pricing.lua
+Token.lua
+Capture.lua
+Flush.lua
+Vault.lua
+Options.lua
+ImportExport.lua
+Sessions.lua
+Window.lua
+Feed.lua

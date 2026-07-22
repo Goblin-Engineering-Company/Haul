@@ -1,0 +1,11 @@
+-- CombatLogInit.lua — intentionally a NO-OP (kept in Haul.toc so removing it needs no client restart).
+--
+-- Kill tracking originally used COMBAT_LOG_EVENT_UNFILTERED (PARTY_KILL). That event is PROTECTED: WoW blocks
+-- its RegisterEvent from any execution carrying value-taint, and in a real addon environment (Auctionator taints
+-- LibStub, TSM taints the mailbox hooks, …) the taint reaches Haul before even this — the FIRST — file runs, so
+-- the registration is blocked with "AddOn tried to do something only the WoW UI can do". Four approaches all
+-- failed (file-load, PLAYER_LOGIN, C_Timer, first-file). See auto-memory combat-log-protected-registration-taint.
+--
+-- So kills are now derived from the (non-protected) CHAT_MSG_COMBAT_XP_GAIN "X dies, you gain N experience"
+-- message instead — see ns._recordKill / onXPGainMsg in Core.lua. Limitation: only counts kills that grant XP
+-- (gray/trivial mobs and max-level kills are missed). This file registers NOTHING to keep the popup gone.

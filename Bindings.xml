@@ -1,0 +1,26 @@
+<Bindings>
+	<Binding name="HAUL_WINDOW" category="BINDING_HEADER_HAUL">
+		Haul_ToggleWindow();
+	</Binding>
+	<Binding name="HAUL_RESET" category="BINDING_HEADER_HAUL">
+		Haul_Reset();
+	</Binding>
+	<Binding name="HAUL_TOGGLETRACK" category="BINDING_HEADER_HAUL">
+		Haul_ToggleTracking();
+	</Binding>
+	<Binding name="HAUL_PAUSE" category="BINDING_HEADER_HAUL">
+		Haul_Pause();
+	</Binding>
+	<Binding name="HAUL_RESUME" category="BINDING_HEADER_HAUL">
+		Haul_Resume();
+	</Binding>
+	<Binding name="HAUL_SAVE" category="BINDING_HEADER_HAUL">
+		Haul_SaveSession();
+	</Binding>
+	<Binding name="HAUL_FLUSH" category="BINDING_HEADER_HAUL">
+		Haul_Flush();
+	</Binding>
+	<Binding name="HAUL_OPTIONS" category="BINDING_HEADER_HAUL">
+		Haul_Options();
+	</Binding>
+</Bindings>

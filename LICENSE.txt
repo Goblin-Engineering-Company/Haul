@@ -1,0 +1,27 @@
+Goblin Engineering Company — Addon License
+
+Copyright © 2026 Goblin Engineering Company. All rights reserved.
+
+You may:
+  • install and use this addon, free of charge, in World of Warcraft;
+  • read the source code.
+
+You may NOT, without prior written permission from Goblin Engineering
+Company:
+  • redistribute, re-host, or re-package this addon or any part of it,
+    including on addon distribution sites;
+  • publish modified versions or derivative addons based on this code;
+  • use this code in a commercial product or service.
+
+Embedded libraries under Libs/ are separately licensed (MIT) and may be
+used under their own terms — see the license file or notice that
+accompanies each library.
+
+Official distribution: https://goblineng.co and the Goblin Engineering
+Company pages on addon distribution sites. Copies obtained anywhere else
+are unauthorized.
+
+THIS ADDON IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDER BE LIABLE FOR
+ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THIS
+ADDON.
