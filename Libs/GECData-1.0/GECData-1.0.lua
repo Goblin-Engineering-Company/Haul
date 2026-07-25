@@ -187,7 +187,7 @@ end
 ------------------------------------------------------------- WoW Token price ----
 -- lib.TokenPrice() → the current WoW Token market price in COPPER (a number), or nil until a
 -- price is known. Reusable numeric accessor for any addon that needs the raw price to do
--- arithmetic (e.g. Coffer's gold→USD→credit) WITHOUT touching C_WowTokenPublic itself.
+-- arithmetic (e.g. converting a gold amount to an estimated value) WITHOUT touching C_WowTokenPublic itself.
 --
 -- C_WowTokenPublic.GetCurrentMarketPrice() is itself the client-side cache and returns nil
 -- until the first market update. We lazily request an update ONCE (the client caches the

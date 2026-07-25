@@ -1,0 +1,66 @@
+# ==============================================================================
+# Standard .gitignore — Goblin Engineering Company WoW addons
+# Ignores CRUFT ONLY. Never source: *.lua, *.toc, *.xml, sounds/, art/, tests/,
+# Libs/ and README/LICENSE are all intentionally tracked.
+# This file lives in the addon SOURCE folder and propagates to the public mirror
+# via scripts/publish-public.sh (rsync carries it through).
+# ==============================================================================
+
+# --- macOS ---
+.DS_Store
+.DS_Store?
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# --- Windows ---
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Linux ---
+*~
+.directory
+.Trash-*
+
+# --- Dropbox (this tree lives under a Dropbox path; conflicted copies are real) ---
+*conflicted copy*
+.dropbox
+.dropbox.attr
+.dropbox.cache
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+.netrwhist
+
+# --- Backup / temp / merge leftovers ---
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
+*.old
+
+# --- Lua build artifacts ---
+luac.out
+*.luac
+
+# --- Packaging output (BigWigs packager / CurseForge / zips) ---
+.release/
+*.zip
+
+# --- Misc logs ---
+*.log

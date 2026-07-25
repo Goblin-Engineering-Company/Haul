@@ -1,7 +1,7 @@
 -- GECStore-1.0 — shared persistent journal/event store + character/place identity registry
 -- for Goblin Engineering Company WoW addons. Pure logic is headless-testable (luajit); all live-WoW
 -- reads (identity, build stamp, entity resolve, faction standing) are delegated to GECReader-1.0.
-local MAJOR, MINOR = "GECStore-1.0", 23   -- 23: + "quest" registry type (GECQuest atlas). 22: PurgeThroughBuild (unload sessions/events/markers at-or-before a build). 21: NewSession (atomic Close→Begin for the "New" button). 20: Combine (retrospective typed combine session). 19: PlaceIndex uses GECMap for the place id. 18: RepairOrphans (encapsulate events whose markers were lost). 17: RepairIfDangling reasonOverride. 16: mail+vendor excluded from value. 15: character bound at Begin. 14: Sideline/Restore. 13: + Session module.
+local MAJOR, MINOR = "GECStore-1.0", 25   -- 25: per-stream `seq` durable stream key + `_streamMeta{seq,base}`; deletion API (Truncate/PurgeBelow, the ONLY legal stream removal) + StreamGaps integrity check; self-heal seq seed at RegisterStore. 24: singleton-guard the snapshot + CHAT_MSG_SKILL live frames so a LibStub upgrade re-run (embed drift) can't spawn duplicate listeners — the skill-up double-append fix. 23: + "quest" registry type (GECQuest atlas). 22: PurgeThroughBuild (unload sessions/events/markers at-or-before a build). 21: NewSession (atomic Close→Begin for the "New" button). 20: Combine (retrospective typed combine session). 19: PlaceIndex uses GECMap for the place id. 18: RepairOrphans (encapsulate events whose markers were lost). 17: RepairIfDangling reasonOverride. 16: mail+vendor excluded from value. 15: character bound at Begin. 14: Sideline/Restore. 13: + Session module.
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end   -- a newer copy is already loaded
 
@@ -266,7 +266,17 @@ end
 function StoreMT:Src() return self._src end
 
 function StoreMT:Append(name, rec)
-  self:Stamp(rec)
+  self:Stamp(rec)                                  -- t, gen, src
+  -- Per-stream durable sequence key (spec: 2026-07-24-gecstore-seq-event-identity). `_streamMeta` is a
+  -- top-level SV table (sibling of `streams`); `seq` is a monotonic per-stream high-water mark, contiguous
+  -- 1,2,3..., NEVER reset (a purge/wipe advances `base`, not `seq`), so a compaction can't renumber a record
+  -- and make the sync cursor replay. This is the ONE append path — keep it so.
+  local sv = _G[self._sv]
+  sv._streamMeta = sv._streamMeta or {}
+  local m = sv._streamMeta[name]
+  if not m then m = { seq = 0, base = 1 }; sv._streamMeta[name] = m end
+  m.seq = m.seq + 1
+  rec.seq = m.seq
   local s = self:Stream(name)
   s[#s + 1] = rec               -- append-only, oldest first
   return rec
@@ -285,6 +295,68 @@ function StoreMT:PendingCount(name)
   return total
 end
 
+-- ── Deletion API — the ONLY legal way to remove stream records. Direct `sv.streams[name]` mutation
+-- (wipe/nil) is FORBIDDEN (spec §4): both entry points advance the per-stream deletion watermark `base`
+-- so StreamGaps can tell an intentional purge from real loss, and so `base` can ride the export ("delete
+-- seq < base") to every downstream layer. `seq` (the high-water mark) is NEVER reset. Enforcement is
+-- doctrine + the StreamGaps phantom-hole tripwire, not a runtime lock (a proxy would break #/ipairs for
+-- direct readers and tax the hot path).
+
+-- Handle-free full wipe: clean-start wipes historically run during early DB init, BEFORE RegisterStore
+-- (SBF migrateFishlogWipe), so there is no store handle yet. Empties the array in place (keeps its table
+-- identity) and sets `base = seq + 1` — without that advance a wipe of 1..N would leave base=1 and the next
+-- append (N+1) would make StreamGaps report N phantom holes. Returns the count removed.
+function lib.Truncate(svName, name)
+  local sv = _G[svName]; if not sv then return 0 end
+  sv.streams     = sv.streams or {}
+  sv._streamMeta = sv._streamMeta or {}
+  local m = sv._streamMeta[name]; if not m then m = { seq = 0, base = 1 }; sv._streamMeta[name] = m end
+  local s = sv.streams[name]
+  local n = s and #s or 0
+  if s then for i = #s, 1, -1 do s[i] = nil end end
+  m.base = (m.seq or 0) + 1
+  return n
+end
+function StoreMT:Truncate(name) return lib.Truncate(self._sv, name) end
+
+-- Front-truncation purge at a seq watermark: remove records with `seq < cutSeq`, advance `base = cutSeq`
+-- (monotonic — base only climbs). PurgeThroughBuild computes cutSeq as the lowest surviving-session seq so
+-- the removal is always a contiguous front-truncation, never an interior hole. Returns the count removed.
+function StoreMT:PurgeBelow(name, cutSeq)
+  local sv = _G[self._sv]
+  sv._streamMeta = sv._streamMeta or {}
+  local m = sv._streamMeta[name]; if not m then m = { seq = 0, base = 1 }; sv._streamMeta[name] = m end
+  local s = sv.streams and sv.streams[name]
+  local removed = 0
+  if s then
+    local w = 0
+    for r = 1, #s do
+      local e = s[r]
+      if e and e.seq and e.seq < cutSeq then removed = removed + 1
+      else w = w + 1; s[w] = e end
+    end
+    for i = #s, w + 1, -1 do s[i] = nil end
+  end
+  if cutSeq > (m.base or 1) then m.base = cutSeq end
+  return removed
+end
+
+-- Read-only integrity check (first layer — non-sync users get it too). A missing `seq` inside `[base, seq]`
+-- is a HOLE (lost record → alarm); values below `base` are the recorded purge (fine). Because `meta.seq` is
+-- a high-water mark stored OUTSIDE the array, this also catches TAIL loss (records dropped off the end leave
+-- meta.seq above the highest present). O(n) over the live window; run on demand, never per-append.
+function lib.StreamGaps(store, name)
+  local sv = _G[store._sv]
+  local m = (sv._streamMeta and sv._streamMeta[name]) or { seq = 0, base = 1 }
+  local base, hi = m.base or 1, m.seq or 0
+  local present = {}
+  local s = sv.streams and sv.streams[name]
+  if s then for i = 1, #s do local q = s[i] and s[i].seq; if q then present[q] = true end end end
+  local holes = {}
+  for q = base, hi do if not present[q] then holes[#holes + 1] = q end end
+  return { holes = holes, base = base, seq = hi, ok = (#holes == 0) }
+end
+
 -- Register (and shape-init) a per-addon store living in the SavedVariable named opts.sv.
 -- opts: sv (SavedVariable name), src (source/producer tag on records), schemaVersion (this store's shape,
 -- default 1), build (the producer addon's BUILD stamp — string or a function returning it; stamped into the
@@ -298,6 +370,19 @@ function lib.RegisterStore(opts)
   sv.version = opts.schemaVersion or sv.version or 1
   sv.streams = sv.streams or {}
   sv._gen    = sv._gen    or 0
+  -- Self-healing seq seed: ensure each stream's meta.seq is at least the highest seq PRESENT, so a lost
+  -- _streamMeta (partial SV restore / manual SV surgery) re-derives from the data instead of restarting at
+  -- 1 and colliding with already-acked values. Legacy records carry no seq → this yields 0 (harmless).
+  -- One cheap O(n) scan per stream at register.
+  sv._streamMeta = sv._streamMeta or {}
+  for name, s in pairs(sv.streams) do
+    local m = sv._streamMeta[name]
+    if not m then m = { seq = 0, base = 1 }; sv._streamMeta[name] = m end
+    local hi = m.seq or 0
+    for i = 1, #s do local q = s[i] and s[i].seq; if q and q > hi then hi = q end end
+    m.seq  = hi
+    m.base = m.base or 1
+  end
   return setmetatable({ _sv = opts.sv, _src = opts.src, _build = opts.build, _streamSchemas = opts.streamSchemas },
     StoreMT)
 end
@@ -654,19 +739,28 @@ function lib._markWarm() lib._warm = true end
 function lib._resetWarm() lib._warm = false; lib._lastProbe = nil end
 
 -- Live snapshot triggers: entering world + logout + the union of every descriptor's events.
+-- SINGLETON-GUARDED: LibStub re-runs this whole module body when a HIGHER-minor embed loads after a
+-- lower one (embed drift across addons that ship different lib copies). An unguarded CreateFrame here
+-- would leave the first frame registered AND spawn a second, firing the snapshot N times per trigger.
+-- Keep exactly ONE frame on the persistent lib table (LibStub preserves `lib` across an upgrade);
+-- re-register the event set idempotently each run so late/added descriptors still attach to it.
 if CreateFrame then
-  local sf = CreateFrame("Frame")
+  local sf = lib._snapFrame
+  if not sf then
+    sf = CreateFrame("Frame")
+    lib._snapFrame = sf
+    sf:SetScript("OnEvent", function(_, event)
+      if event == "TRADE_SKILL_LIST_UPDATE" then lib._markWarm() end
+      -- Deliberately NO reset on PLAYER_ENTERING_WORLD: a /reload or zone-in does not close the live
+      -- trade-skill data, so forcing cold here is what caused the gray-after-reload bug. On a /reload the
+      -- Lua teardown already re-inits _warm=false, and ProfessionsWarmed() re-derives it from the live API;
+      -- on a zone change warmth legitimately persists. (Was: if PEW then lib._resetWarm().)
+      lib.RequestSnapshot()
+    end)
+  end
   local ev = { PLAYER_ENTERING_WORLD = true, PLAYER_LOGOUT = true }
   for _, d in pairs(lib._fields) do if d.events then for _, e in ipairs(d.events) do ev[e] = true end end end
   for e in pairs(ev) do sf:RegisterEvent(e) end
-  sf:SetScript("OnEvent", function(_, event)
-    if event == "TRADE_SKILL_LIST_UPDATE" then lib._markWarm() end
-    -- Deliberately NO reset on PLAYER_ENTERING_WORLD: a /reload or zone-in does not close the live
-    -- trade-skill data, so forcing cold here is what caused the gray-after-reload bug. On a /reload the
-    -- Lua teardown already re-inits _warm=false, and ProfessionsWarmed() re-derives it from the live API;
-    -- on a zone change warmth legitimately persists. (Was: if PEW then lib._resetWarm().)
-    lib.RequestSnapshot()
-  end)
 end
 
 -- One-time login wiring: bump the write generation (so this session's records read as "pending" until
@@ -763,8 +857,13 @@ function lib.HandleSkillMessage(msg)
 end
 
 -- Live frame: dispatch CHAT_MSG_SKILL into HandleSkillMessage.
-if CreateFrame then
+-- SINGLETON-GUARDED (see _snapFrame above): one frame on the persistent lib table so a LibStub upgrade
+-- re-run can't spawn a second CHAT_MSG_SKILL listener — that was the confirmed skill-up double-append.
+-- Dispatch is dynamic (lib.HandleSkillMessage resolved per event) so the retained frame always runs the
+-- newest code even after an upgrade re-defines the handler.
+if CreateFrame and not lib._skillFrame then
   local cf = CreateFrame("Frame")
+  lib._skillFrame = cf
   cf:RegisterEvent("CHAT_MSG_SKILL")
   cf:SetScript("OnEvent", function(_, _, msg) lib.HandleSkillMessage(msg) end)
 end

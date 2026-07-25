@@ -448,39 +448,62 @@ local function verLE(a, b)
   return true   -- equal counts as <=
 end
 
--- In-place drop every list entry whose .sid is in `doomed`; returns how many were removed.
-local function dropSids(list, doomed)
-  if not list then return 0 end
-  local removed, w = 0, 0
-  for r = 1, #list do
-    local e = list[r]
-    if e and e.sid and doomed[e.sid] then removed = removed + 1
-    else w = w + 1; list[w] = e end
+-- Lowest seq among records that must SURVIVE a build-purge (any record NOT owned by a doomed session).
+-- Everything below this is provably doomed, so PurgeBelow drops it as a contiguous FRONT-truncation and
+-- never carves an interior hole — even when sideline/restore has interleaved a doomed session's records
+-- among surviving ones. nil ⇒ nothing survives ⇒ the whole stream goes.
+local function survivorCut(list, doomed)
+  local cut
+  for i = 1, #(list or {}) do
+    local e = list[i]
+    if e and e.seq and not (e.sid and doomed[e.sid]) then
+      if not cut or e.seq < cut then cut = e.seq end
+    end
   end
-  for i = #list, w + 1, -1 do list[i] = nil end
-  return removed
+  return cut
 end
 
--- Purge every FROZEN session whose CREATING build (builds[1]) is <= `version` (CalVer, numeric-segment),
--- along with that session's events + markers. The currently-OPEN session is NEVER purged (it's live). Use
--- to unload stale test data the server now rejects so Uplink stops re-pushing it. Returns
--- { sessions, events, markers } counts. Persists with the SV on the next write (/reload or logout).
+-- Front-truncate one stream through a build-purge: cut at the lowest surviving seq via PurgeBelow, or
+-- Truncate the whole stream when nothing survives. Returns the count removed.
+local function purgeStreamThroughBuild(handle, name, list, doomed)
+  if not list or #list == 0 then return 0 end
+  local cut = survivorCut(list, doomed)
+  if not cut then return handle:Truncate(name) end
+  return handle:PurgeBelow(name, cut)
+end
+
+-- Purge every FROZEN session whose CREATING build (builds[1]) is <= `version` (CalVer, numeric-segment).
+-- The OPEN and SIDELINED sessions are NEVER purged (they're live). Redefined (MINOR 25) as a per-stream
+-- FRONT-TRUNCATION at a seq watermark, not a per-sid removal: a per-sid drop could leave an interior hole
+-- under sideline/restore interleaving, which `base` can't describe and StreamGaps would false-alarm as
+-- loss. A doomed session's records ABOVE the cut survive until a later purge catches them (correctness over
+-- eagerness). Returns { sessions = headers removed, doomed, events, markers }. Persists on the next SV write.
 function CtrlMT:PurgeThroughBuild(version)
   local st = store(self)
   local sessions = st.sessions or {}
   local openSid = st._open and st._open.sid
+  local sidelinedSid = st._sidelined and st._sidelined.sid
   local doomed, nS = {}, 0
   for sid, rec in pairs(sessions) do
-    if sid ~= openSid then
+    if sid ~= openSid and sid ~= sidelinedSid then
       local b = rec.builds and rec.builds[1]
       if b and verLE(b, version) then doomed[sid] = true; nS = nS + 1 end
     end
   end
-  for sid in pairs(doomed) do sessions[sid] = nil end
-  local streams = st.streams or {}
-  local nE = dropSids(streams.events, doomed)
-  local nM = dropSids(streams.markers, doomed)
-  return { sessions = nS, events = nE, markers = nM }
+  local handle, streams = self._handle, st.streams or {}
+  local nE = purgeStreamThroughBuild(handle, "events",  streams.events,  doomed)
+  local nM = purgeStreamThroughBuild(handle, "markers", streams.markers, doomed)
+  -- Drop a doomed HEADER only once none of its records remain — keeping it lets a later purge still see its
+  -- above-cut leftovers as doomed; deleting eagerly would make them read as survivors and pin the cut.
+  local present = {}
+  for _, nm in ipairs({ "events", "markers" }) do
+    for _, e in ipairs(streams[nm] or {}) do if e and e.sid then present[e.sid] = true end end
+  end
+  local removedHeaders = 0
+  for sid in pairs(doomed) do
+    if not present[sid] then sessions[sid] = nil; removedHeaders = removedHeaders + 1 end
+  end
+  return { sessions = removedHeaders, doomed = nS, events = nE, markers = nM }
 end
 
 function CtrlMT:Sid()      return (store(self)._open or {}).sid end

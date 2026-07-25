@@ -8,12 +8,15 @@
 -- live bar/stats; this engine runs underneath it (Spec 1, additive hybrid).
 local ADDON, ns = ...
 
-local DATA_VERSION = 6   -- v6 = session-model rework (spec 2026-07-16): lifecycle+exclusion MARKERS move to
-                         -- streams.markers; the per-session record fattens to the frozen §3.3 shape written at
-                         -- CLOSE via GECStore.Session; income facts stay in streams.events. v5 = dropped loot `v`.
+local DATA_VERSION = 7   -- v7 = seq-identity rebaseline (spec 2026-07-24, coordinated rollout 2026-07-25):
+                         -- STREAMS-ONLY Truncate so every record restarts born with its per-stream `seq`;
+                         -- the frozen session records (d.sessions) are PRESERVED. v6 = session-model rework
+                         -- (spec 2026-07-16): lifecycle+exclusion MARKERS move to streams.markers; the
+                         -- per-session record fattens to the frozen §3.3 shape written at CLOSE via
+                         -- GECStore.Session; income facts stay in streams.events. v5 = dropped loot `v`.
                          -- v4 = journal relocated to HaulData.streams.events. v3 = collapsed k+src schema.
-                         -- Crossing it AUTO-WIPES the old-format log/sessions + old-format saved snapshots
-                         -- (pre-release, no migration). The old bespoke HaulData.log array is dumped for good.
+                         -- Crossing v6-or-below AUTO-WIPES the old-format log/sessions + old-format saved
+                         -- snapshots (pre-release, no migration).
 
 ------------------------------------------------------------------- store ------
 -- HaulData: separate versioned store (config stays in HaulDB). Account-wide;
@@ -61,7 +64,7 @@ local function InitData()
   -- Clean-start migration to the shared GECStore registry: a v1 store interned chars/places locally
   -- (HaulData.chars / HaulData.places). v2 delegates both to GECStore, so the old log + interning are
   -- abandoned and rebuilt fresh. HaulDB.history snapshots (separate SV) are untouched.
-  if d.version and d.version < DATA_VERSION then
+  if d.version and d.version < 6 then
     -- Clean-start: dump the legacy bespoke array + its bookkeeping. v4 keeps the journal in the exported
     -- GECStore stream HaulData.streams.events instead (created lazily by the first Append).
     d.log, d.sessions, d.nextSid, d.chars, d.places = nil, nil, nil, nil, nil
@@ -73,6 +76,16 @@ local function InitData()
     -- v3: the saved-session snapshots (HaulDB.history, a separate SV) hold OLD-format drops the collapsed
     -- Replay can't read, so clear them once too (pre-release, no migration).
     if d.version < 3 and HaulDB and HaulDB.history then HaulDB.history = {} end
+  end
+  -- v7 = seq-identity rebaseline (spec 2026-07-24 §Migration, coordinated rollout 2026-07-25): the streams
+  -- restart EMPTY so every record is born with its per-stream `seq` (no dual-key, no backfill). Routed
+  -- through the deletion API so `base` lands cleanly at 1 (never nil a seq-stream — chain-of-deletion §4).
+  -- The frozen session records (d.sessions) are PRESERVED — only the append-only streams reset.
+  if d.version and d.version < DATA_VERSION then
+    local GS = LibStub and LibStub:GetLibrary("GECStore-1.0", true)
+    if GS and GS.Truncate then GS.Truncate("HaulData", "events"); GS.Truncate("HaulData", "markers") end
+    d._open, d._sidelined = nil, nil   -- controller pointers reference wiped markers
+    if HaulDB then HaulDB.liveSession = nil; HaulDB.sidelined = nil end
   end
   d.version  = DATA_VERSION
   d.sessions = d.sessions or {}   -- [sid] = the frozen §3.3 record (builds/gameEnv/timing/prices/exclusions), written at close
@@ -202,10 +215,14 @@ end
 function ns.PurgeLog()
   if not HaulData then return 0 end
   local n = (HaulData.streams and HaulData.streams.events and #HaulData.streams.events) or 0
-  if HaulData.streams then
-    if HaulData.streams.events  then wipe(HaulData.streams.events)  end
-    if HaulData.streams.markers then wipe(HaulData.streams.markers) end   -- markers are part of the RECORD too;
-  end                                                                     -- leaving them orphans start/stop/fold rows
+  -- Route through the deletion API (GECStore MINOR 25): Truncate empties the array AND advances the seq
+  -- watermark `base`, so StreamGaps stays quiet and the "delete seq < base" signal rides to every downstream
+  -- layer. Direct wipe() of a seq-stream is forbidden (seq spec §4).
+  local hs = haulStore()
+  if hs then
+    hs:Truncate("events")
+    hs:Truncate("markers")   -- markers are part of the RECORD too; leaving them orphans start/stop/fold rows
+  end
   HaulData.sessions = {}
   -- drop every pointer INTO the wiped record so nothing dangles onto gone markers/events. The caller
   -- reloads after; RestoreOrNew then starts a clean fresh session on the now-empty streams.
