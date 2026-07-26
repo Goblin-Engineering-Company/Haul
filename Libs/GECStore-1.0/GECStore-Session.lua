@@ -311,12 +311,30 @@ function CtrlMT:Fold(fromsid, via)
   self._handle:Append("markers", { k = "fold", sid = open.sid, fromsid = fromsid, via = via, t = lib._now() })
 end
 
+-- Seal an open pause at close (rule 2026-07-25): whatever ENDS the session —
+-- a user close, logout-while-paused, or a crash/version repair — INSERTS the
+-- missing resume marker with the SAME timestamp as that closing entry, so a
+-- frozen record never carries a dangling {p} span. (Downstream, a dangling
+-- span read as NaN activeSeconds on the server; in-game pausedSeconds
+-- silently counted it as 0.) Laid BEFORE the stop marker so stream order
+-- stays pause → resume → stop.
+local function sealOpenPause(self, sid, t)
+  local st = store(self)
+  local timing = Session._deriveTiming(st.streams and st.streams.markers, sid)
+  local last = timing.pauses[#timing.pauses]
+  if last and last.p and not last.r then
+    self._handle:Append("markers", { k = "resume", sid = sid, t = t })
+  end
+end
+
 -- Close the open session: stop marker + freeze the record. `prices` = the addon's frozen snapshot
 -- {[itemID]={unit,source}} (GECStore doesn't value items). reason ∈ user/logout/boundary/…
 function CtrlMT:Close(reason, prices)
   local st = store(self); local open = st._open
   if not open then return nil end
-  self._handle:Append("markers", { k = "stop", sid = open.sid, reason = reason or "user", t = lib._now() })
+  local t = lib._now()
+  sealOpenPause(self, open.sid, t)
+  self._handle:Append("markers", { k = "stop", sid = open.sid, reason = reason or "user", t = t })
   freezeRecord(self, open.sid, prices, open)
   st._open = nil
   fire(self, "close", open.sid, reason or "user")
@@ -352,6 +370,7 @@ function CtrlMT:RepairIfDangling(prices, reasonOverride)
   for _, e in ipairs(streams.events or {}) do if e.sid == open.sid and (e.t or 0) > lastT then lastT = e.t end end
   if lastT == 0 then lastT = lib._now() end
   local reason = reasonOverride or ((open.schema ~= st.version) and "version-change" or "crash-repair")
+  sealOpenPause(self, open.sid, lastT)   -- crash/logout while paused: resume rides the same timestamp
   self._handle:Append("markers", { k = "stop", sid = open.sid, reason = reason, t = lastT })
   freezeRecord(self, open.sid, prices, open)
   st._open = nil

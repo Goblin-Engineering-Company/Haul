@@ -3,7 +3,7 @@
 ## Notes: Loot / gold-per-hour tracker. Per-item exclude-from-gold, collapsible bar, reload-to-sync.
 ## Category: GEC
 ## Author: Goblin Engineering Company
-## Version: 2026.07.25.2
+## Version: 2026.07.25.3
 ## X-GEC-Channel: public
 ## SavedVariables: HaulDB, HaulState, HaulData, GECStoreDB
 ## OptionalDeps: TradeSkillMaster, Auctionator
