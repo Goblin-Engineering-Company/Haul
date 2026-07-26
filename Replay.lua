@@ -61,6 +61,41 @@ function Replay.Rebuild(events, opts)
   local vendor = { sell = 0, buy = 0, repair = 0 }
   local excluded, psSeen = {}, {}
 
+  -- Pause exclusion (spec §5.3, wired 2026-07-26): events INSIDE a pause
+  -- window do NOT count toward the session — pause means "this isn't the
+  -- session" (a mail run, an AFK trade). The raw log keeps every event (the
+  -- Log tab shows them); this gates AGGREGATION only, so future pause-editing
+  -- re-includes by moving the window. Windows come from opts.markers
+  -- (post-refactor) or inline legacy pause/resume entries; an unresumed
+  -- window excludes through the end. Strictly inside (p, r) — an event
+  -- stamped the same second as the pause/resume press counts as active.
+  -- opts.countPaused = true (HaulDB.countPausedByDefault) disables exclusion.
+  local pauseWins = {}
+  if not opts.countPaused then
+    for _, m in ipairs(opts.markers or {}) do
+      if m.k == "pause" then pauseWins[#pauseWins + 1] = { p = m.t }
+      elseif m.k == "resume" then local last = pauseWins[#pauseWins]; if last and not last.r then last.r = m.t end
+      end
+    end
+    if #pauseWins == 0 then
+      for _, e in ipairs(events or {}) do
+        local ek = kindOf(e)
+        if ek == "pause" then pauseWins[#pauseWins + 1] = { p = e.t }
+        elseif ek == "resume" then local last = pauseWins[#pauseWins]; if last and not last.r then last.r = e.t end
+        end
+      end
+    end
+  end
+  local function skipPaused(k, t)
+    if not t or #pauseWins == 0 then return false end
+    -- lifecycle + edit markers always process (they define windows/overlays)
+    if k == "pause" or k == "resume" or k == "start" or k == "stop" or k == "include" or k == "exclude" then return false end
+    for _, w in ipairs(pauseWins) do
+      if w.p and t > w.p and (not w.r or t < w.r) then return true end
+    end
+    return false
+  end
+
   -- attribution helpers: derive the per-mob / per-node breakdown from the SAME loot/coin/xp events.
   local function ensureKill(id, name)
     id = tonumber(id) or id   -- normalize npcID to number so string/number keys merge the same mob
@@ -95,7 +130,10 @@ function Replay.Rebuild(events, opts)
     -- ACQUISITION source: prefer `from`; fall back to `src` ONLY when it's a real acquisition value.
     -- (In the always-on log e.src is the STORE tag "Haul" — never an acquisition source.)
     local from = e.from or (ACQ_SRC[e.src] and e.src) or nil
-    if k == "loot" then
+    if skipPaused(k, e.t) then
+      -- inside a pause window: captured + visible in the raw log, never
+      -- aggregated into the session (see pauseWins above)
+    elseif k == "loot" then
       if from == "vendor" then
         -- purchased item: log-only, never part of the session aggregate (matches AddLoot early-return)
       else

@@ -377,7 +377,10 @@ local function UnpackSession(sv)
   -- PackSession only persists loot/coin/mail; rep/currency/xp/kills/professions/gather live in the log.
   -- Re-derive them from the restored log (as RestoreOrNew does) so a sidelined instance run that /reloaded
   -- keeps every category instead of coming back with those five empty.
-  if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log)) end
+  if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log, {
+    markers = (s.sid and ns.SidMarkers) and ns.SidMarkers(s.sid) or nil,   -- pause windows (spec §5.3 exclusion)
+    countPaused = HaulDB.countPausedByDefault,
+  })) end
   return s
 end
 
@@ -445,7 +448,10 @@ local function RestoreOrNew()
     end
     -- re-derive the non-loot aggregates from the restored log so they always match it (heals a session
     -- merged/resumed before the SeedAggregates fix, and keeps the log the single source of truth).
-    if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log)) end
+    if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log, {
+    markers = (s.sid and ns.SidMarkers) and ns.SidMarkers(s.sid) or nil,   -- pause windows (spec §5.3 exclusion)
+    countPaused = HaulDB.countPausedByDefault,
+  })) end
     return s
   end
   return NewSession()
@@ -1615,7 +1621,10 @@ ns.EvalItem = EvalItem
 function ns.BuildPriceSnapshot(s)
   local prices = {}
   if not (s and ns.Replay) then return prices end
-  local rebuilt = ns.Replay.Rebuild(s.log or {}) or { items = {} }
+  -- countPaused = true DELIBERATELY: the price snapshot covers EVERY captured
+  -- item (mid-pause included) — it's the record's only price data, and future
+  -- pause-editing may re-include those items; they must already be priced.
+  local rebuilt = ns.Replay.Rebuild(s.log or {}, { countPaused = true }) or { items = {} }
   for _, e in ipairs(rebuilt.items) do
     local id = e.id
     if id and not prices[id] and e.link then
@@ -1642,7 +1651,10 @@ function ns.ComputeStats()
   -- STRUCTURE comes from the session log (the single source of truth) via Replay; the ACTIVE session
   -- prices it LIVE here (EvalItem). The one-off `keep` (mail/craft include) is overlay state on the
   -- session cache (s.items / s.mailGoldLog), looked up by key/seq — everything else is rebuilt.
-  local rebuilt = (s and s.log and ns.Replay and ns.Replay.Rebuild(s.log)) or { items = {}, mailGoldLog = {} }
+  local rebuilt = (s and s.log and ns.Replay and ns.Replay.Rebuild(s.log, {
+    markers = (s.sid and ns.SidMarkers) and ns.SidMarkers(s.sid) or nil,   -- pause windows (spec §5.3 exclusion)
+    countPaused = HaulDB.countPausedByDefault,
+  })) or { items = {}, mailGoldLog = {} }
   local sItems = (s and s.items) or {}
   for _, e in ipairs(rebuilt.items) do
     local id = e.id
@@ -1941,12 +1953,12 @@ function Haul.RebuildFromLog(sid)
   local mk = ns.SidMarkers(sid)   -- timing + character come from the markers stream now
   -- live session
   if ns.session and ns.session.sid == sid and ns.session.log then
-    return ns.Replay.Rebuild(ns.session.log, { priceSource = ns.PriceSourceLabel and ns.PriceSourceLabel(), markers = mk })
+    return ns.Replay.Rebuild(ns.session.log, { priceSource = ns.PriceSourceLabel and ns.PriceSourceLabel(), markers = mk, countPaused = HaulDB.countPausedByDefault })
   end
   -- saved snapshot's own drop log (complete, self-contained)
   if HaulDB and HaulDB.history then
     for _, h in ipairs(HaulDB.history) do
-      if h.sid == sid and h.drops then return ns.Replay.Rebuild(h.drops, { priceSource = h.priceSource, markers = mk }) end
+      if h.sid == sid and h.drops then return ns.Replay.Rebuild(h.drops, { priceSource = h.priceSource, markers = mk, countPaused = HaulDB.countPausedByDefault }) end
     end
   end
   -- fall back to the exported event stream filtered by sid
@@ -1954,7 +1966,7 @@ function Haul.RebuildFromLog(sid)
   if stream then
     local evs = {}
     for _, e in ipairs(stream) do if e.sid == sid then evs[#evs + 1] = e end end
-    return ns.Replay.Rebuild(evs, { priceSource = ns.PriceSourceLabel and ns.PriceSourceLabel(), markers = mk })
+    return ns.Replay.Rebuild(evs, { priceSource = ns.PriceSourceLabel and ns.PriceSourceLabel(), markers = mk, countPaused = HaulDB.countPausedByDefault })
   end
   return nil
 end
@@ -2101,7 +2113,10 @@ function ns.MergeFromHistory(i)
   end
   -- re-derive the non-loot aggregates from the COMBINED log (live events + the folded h.drops), so
   -- currency/rep/xp/kills reflect both runs — not just loot. (Items fold via s.log/s.items above.)
-  if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log)) end
+  if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log, {
+    markers = (s.sid and ns.SidMarkers) and ns.SidMarkers(s.sid) or nil,   -- pause windows (spec §5.3 exclusion)
+    countPaused = HaulDB.countPausedByDefault,
+  })) end
   -- record the fold in the always-on log so a deleted merged run can still be reconstructed: the folded
   -- session's events live under ITS sid; this marker (under the live run's sid) links them in.
   do local S = ns.SessionCtrl and ns.SessionCtrl(); if S and h.sid then S:Fold(h.sid, "merge") end end

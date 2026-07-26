@@ -46,9 +46,25 @@ local function reduceSegment(data, sid)
   local rec = data.sessions[sid]
   local events = (data.streams and data.streams.events) or {}
 
+  -- Pause exclusion (MINOR 27; Haul spec §5.3): events INSIDE a pause window
+  -- do not count toward the session — pause means "this isn't the session"
+  -- (a mail run mid-farm). The stream keeps every record; exclusion is
+  -- resolution-side only, so future pause-editing re-includes by moving the
+  -- window. Strictly inside (p, r); a legacy dangling {p} (pre-seal records)
+  -- excludes through closedAt.
+  local wins = rec.pauses or {}
+  local function inPause(t)
+    if not t or #wins == 0 then return false end
+    for _, w in ipairs(wins) do
+      local r = w.r or rec.closedAt
+      if w.p and t > w.p and (not r or t < r) then return true end
+    end
+    return false
+  end
+
   local byId, coin = {}, 0
   for _, e in ipairs(events) do
-    if e.sid == sid then
+    if e.sid == sid and not inPause(e.t) then
       if e.k == "loot" and e.from ~= "mail" then   -- mail-collected loot is informational (Haul's Mail category), not haul value
         local price = rec.prices and rec.prices[e.id]
         local it = byId[e.id]
