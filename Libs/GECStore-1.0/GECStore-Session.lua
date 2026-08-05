@@ -16,7 +16,8 @@ if not lib then return end
 -- newer Session engine with its older methods (the documented "no change" bug class). Only attach when THIS
 -- copy's SESSION_MINOR beats what's stamped, then stamp it — newest wins regardless of addon load order, and
 -- an older copy loading later is a no-op. Bump SESSION_MINOR on every Session change that must supersede copies.
-local SESSION_MINOR = 1
+local SESSION_MINOR = 3   -- 2: export the CalVer comparator as Session.VerLE (one comparator, no per-addon copies)
+                          -- 3: reduceSegment excludes vendor-purchased loot (Session.IsHaulLoot; matches Replay)
 if lib._sessionMinor and lib._sessionMinor >= SESSION_MINOR then return end
 lib._sessionMinor = SESSION_MINOR
 lib.Session = lib.Session or {}
@@ -27,6 +28,17 @@ local Session = lib.Session
 -- categories): mail gold is AH returns / transfers / self-mail (not fresh income), and vendor sell is
 -- converting already-counted loot to gold (counting it too would double it). Buy/repair are spend.
 local MONETARY = { coin = true }
+
+-- THE acquisition predicate: does this event contribute item value to a session's haul? Exported (below,
+-- as Session.IsHaulLoot) so Haul's Replay/ComputeStats and the server port read ONE rule instead of each
+-- hand-writing it — they drifted before, and reduceSegment was the copy that forgot vendor.
+--   * from == "mail"   informational (AH returns / transfers / self-mail) — Haul's Mail category, not income.
+--   * from == "vendor" a PURCHASED item is not loot. Haul emits the loot event for the ledger, then early-
+--                      returns (Core.lua AddLoot); Replay skips it too. Counting it here inflated any
+--                      Combine / reconstruct by the price of everything the player bought that run.
+local function isHaulLoot(e)
+  return e.k == "loot" and e.from ~= "mail" and e.from ~= "vendor"
+end
 
 -- Sum pause spans [{p,r},…] -> total paused seconds (a dangling span with no r contributes 0).
 local function pausedSeconds(pauses)
@@ -65,7 +77,7 @@ local function reduceSegment(data, sid)
   local byId, coin = {}, 0
   for _, e in ipairs(events) do
     if e.sid == sid and not inPause(e.t) then
-      if e.k == "loot" and e.from ~= "mail" then   -- mail-collected loot is informational (Haul's Mail category), not haul value
+      if isHaulLoot(e) then   -- mail-collected and vendor-purchased rows are informational, not haul value
         local price = rec.prices and rec.prices[e.id]
         local it = byId[e.id]
         if not it then
@@ -482,6 +494,14 @@ local function verLE(a, b)
   end
   return true   -- equal counts as <=
 end
+-- EXPORTED (SESSION_MINOR 2): the ONE CalVer comparator. Any consumer gating on a build stamp — a purge,
+-- a data repair, a migration — uses this instead of hand-rolling a second version compare. A plain string
+-- compare is the trap it exists to avoid ("2026.07.18.10" < "2026.07.18.3" lexically, but not numerically).
+lib.Session.VerLE = verLE
+
+-- EXPORTED (SESSION_MINOR 3): the ONE acquisition predicate (see isHaulLoot above). A front-end deciding
+-- "does this loot event count toward the haul?" calls this rather than writing the rule a fourth time.
+lib.Session.IsHaulLoot = isHaulLoot
 
 -- Lowest seq among records that must SURVIVE a build-purge (any record NOT owned by a doomed session).
 -- Everything below this is provably doomed, so PurgeBelow drops it as a contiguous FRONT-truncation and

@@ -136,6 +136,8 @@ local DB_DEFAULTS = {
                                      -- never auto-trimmed; purge manually with /haul prune <N>)
   logSearchMode = "highlight",       -- Log-tab search mode: "highlight" (tint + next/prev jump) | "filter" (show only matches)
   countPausedByDefault = false,      -- spec §5.3: paused events excluded from totals by default (Spec 4 uses this)
+  batchGap = 0.3,                    -- seconds; gap that starts a new multi-item batch for opener-less streams
+  refreshThrottle = 0.1,             -- seconds; min gap between window refreshes (leading edge + one trailing pass). 0 = refresh on every event
   -- window — anchored by its TOP-LEFT (left/top screen coords) so collapsing
   -- grows/shrinks DOWNWARD and the top edge stays put. Set on first drag.
   window = {
@@ -305,6 +307,7 @@ local function NewSession()
     items = {},                           -- (id or id.."@"..from) -> { id, link, count, seq, from, keep }
     log = {},                             -- chronological loot events (List view)
     seq = 0,                              -- first-seen order counter (Time sort)
+    batchSeq = 0,                         -- batch-id counter (see ns.BeginBatch/EndBatch/CurrentBatch)
     waypoints = {},
     rep = {},                             -- faction name -> reputation gained this session
     repLog = {},                          -- chronological rep gains { faction, amount, t } (Rep List view)
@@ -348,7 +351,7 @@ local function PackSession(s)
   return {
     accum = elapsed, gold = s.gold or 0, wasRunning = s._wasRunning and true or false,
     mailGoldLog = s.mailGoldLog or {}, mailGoldSeq = s.mailGoldSeq or 0,
-    items = s.items, log = s.log, seq = s.seq, waypoints = s.waypoints, startedAt = s.startedAt,
+    items = s.items, log = s.log, seq = s.seq, batchSeq = s.batchSeq, waypoints = s.waypoints, startedAt = s.startedAt,
     establishedAt = s.establishedAt, merges = s.merges, sid = s.sid,
     character = s.character, class = s.class,
   }
@@ -369,11 +372,16 @@ local function UnpackSession(sv)
     gold = tonumber(sv.gold) or 0, _wasRunning = sv.wasRunning ~= false,
     mailGoldLog = mgl, mailGoldSeq = tonumber(sv.mailGoldSeq) or MaxMailGoldSeq(mgl),
     items = sv.items or {}, log = sv.log or {}, seq = tonumber(sv.seq) or 0,
+    batchSeq = tonumber(sv.batchSeq) or 0,
     waypoints = sv.waypoints or {}, startedAt = sv.startedAt or time(),
     establishedAt = sv.establishedAt or sv.startedAt, merges = sv.merges,
     sid = sv.sid,   -- string sid; tonumber() nuked it (same bug as RestoreOrNew) — the sidelined instance run kept its sid
     character = sv.character, class = sv.class,
   }
+  -- guard against reload collisions: batchSeq must be at least the highest bid already logged, else a
+  -- freshly-restarted counter could re-issue a bid that collides with an older row's (breaking "last batch").
+  do local mx = 0 for _, r in ipairs(s.log or {}) do if (r.bid or 0) > mx then mx = r.bid end end
+     s.batchSeq = math.max(s.batchSeq or 0, mx) end
   -- PackSession only persists loot/coin/mail; rep/currency/xp/kills/professions/gather live in the log.
   -- Re-derive them from the restored log (as RestoreOrNew does) so a sidelined instance run that /reloaded
   -- keeps every category instead of coming back with those five empty.
@@ -394,7 +402,7 @@ local function SaveLive()
   HaulDB.liveSession = {
     running = s.running, accum = ns.Elapsed(), gold = ns.Coin(),
     mailGoldLog = s.mailGoldLog or {}, mailGoldSeq = s.mailGoldSeq or 0,
-    items = s.items, log = s.log, seq = s.seq,
+    items = s.items, log = s.log, seq = s.seq, batchSeq = s.batchSeq,
     waypoints = s.waypoints, rep = s.rep, repLog = s.repLog,
     currency = s.currency, currencyLog = s.currencyLog,
     professions = s.professions, professionsLog = s.professionsLog,
@@ -420,6 +428,7 @@ local function RestoreOrNew()
       gold = tonumber(sv.gold) or math.max(0, tonumber(sv.moneyAccum) or 0),
       mailGoldLog = mgl, mailGoldSeq = tonumber(sv.mailGoldSeq) or MaxMailGoldSeq(mgl),
       items = sv.items or {}, log = sv.log or {}, seq = tonumber(sv.seq) or 0,
+      batchSeq = tonumber(sv.batchSeq) or 0,
       waypoints = sv.waypoints or {}, rep = sv.rep or {}, repLog = sv.repLog or {},
       currency = sv.currency or {}, currencyLog = sv.currencyLog or {},
       professions = sv.professions or {}, professionsLog = sv.professionsLog or {},
@@ -446,6 +455,10 @@ local function RestoreOrNew()
     elseif ctrl and not ctrl:IsOpen() then
       s.sid = nil; if ns.BeginSession then ns.BeginSession(s) end
     end
+    -- guard against reload collisions: batchSeq must be at least the highest bid already logged, else a
+    -- freshly-restarted counter could re-issue a bid that collides with an older row's (breaking "last batch").
+    do local mx = 0 for _, r in ipairs(s.log or {}) do if (r.bid or 0) > mx then mx = r.bid end end
+       s.batchSeq = math.max(s.batchSeq or 0, mx) end
     -- re-derive the non-loot aggregates from the restored log so they always match it (heals a session
     -- merged/resumed before the SeedAggregates fix, and keeps the log the single source of truth).
     if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(s, ns.Replay.Rebuild(s.log, {
@@ -626,8 +639,13 @@ local function onPlayerMoney()
     end
   elseif ns.MerchantOpen() then
     -- Vendor money is LOG-ONLY: sell (gain) / buy (spend) / repair (spend, disambiguated by the
-    -- RepairAllItems hook). NEVER added to ns.session.gold and NEVER added to s.log — it stays out
-    -- of the haul and the window entirely; only the always-on event log records it.
+    -- RepairAllItems hook). NEVER added to ns.session.gold, and never displayed or counted — it stays
+    -- out of the haul and the window entirely.
+    -- CORRECTION (this comment used to say "NEVER added to s.log", which is false and cost us a bug):
+    -- appendVendorLog below DOES append a row to s.log, because s.log is the complete chronological
+    -- stream the views rebuild from — that is what feeds the VENDOR category tab (BuildVendorCollection-
+    -- Entries) in both the live window and the Data page. "Log-only" here means EXCLUDED FROM THE TOTALS,
+    -- not hidden and not unbankable: a vendor-only run still banks. See ns.SessionHasData.
     local delta = now - (ns._lastMoney or now)
     if delta > 0 then
       ns.LogEvent("vendor", { amount = delta, vt = "sell", from = "vendor" })
@@ -825,7 +843,11 @@ end
 local function onCurrencyUpdate(currencyType, quantity, quantityChange)
   if not currencyType or not quantityChange or quantityChange == 0 then return end
   if not isRealCurrency(currencyType) then return end   -- skip Torghast scoreboard + other internal UI currencies
-  if ns.LogEvent then ns.LogEvent("currency", { cid = currencyType, id = currencyType, amount = quantityChange }) end   -- always-on log (gains + spends; server labels by cid, keep id too — safe)
+  -- the NAME rides the event itself: Blizzard's server API has NO currency
+  -- endpoint (both /currency and /currency-type 404), so without this the
+  -- site could only label "Currency <id>" for any id it hasn't seen mapped.
+  local cinfo = C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo and C_CurrencyInfo.GetCurrencyInfo(currencyType)
+  if ns.LogEvent then ns.LogEvent("currency", { cid = currencyType, id = currencyType, amount = quantityChange, name = cinfo and cinfo.name or nil }) end   -- always-on log (gains + spends)
   -- snapshot id->NAME into the shared registry: prefer writing the LIVE name (GetCurrencyInfo) so the
   -- record carries it even when the Reader can't resolve later (the server has no currency-name API and
   -- many currencies otherwise come back nameless); fall back to the Reader-resolved Note.
@@ -894,8 +916,23 @@ function ns.SyncXPBaseline() xpBaseline, xpLevelBaseline, xpMaxBaseline = readXP
 -- Net: the LOG has one attributed event per gain, and every xp event's `a` SUMS to the true total. Order-safe
 -- (delta vs chat can arrive in either order — only the totals at reconcile time matter). Live s.xp/subsets
 -- (below) are unchanged: they update immediately for the live window; this governs only the persistent LOG.
+-- Zone-change marker + timestamp. A new area often grants DISCOVERY XP with no chat line (esp. in
+-- special leveling instances), which then surfaces as the first XP event's reconcile leftover. This lets
+-- the trace show the correlation, and lets the reconcile label that leftover "disc" instead of "other".
+local lastZoneChangeAt, lastZoneName, zoneDiscoveryPending = 0, "?", false
+do
+  local zf = CreateFrame("Frame")
+  zf:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+  zf:RegisterEvent("PLAYER_ENTERING_WORLD")
+  zf:SetScript("OnEvent", function(_, ev)
+    lastZoneChangeAt = (GetTime and GetTime()) or 0
+    lastZoneName = (GetZoneText and GetZoneText()) or (GetSubZoneText and GetSubZoneText()) or "?"
+    zoneDiscoveryPending = true   -- arm: the first unexplained surplus after this is un-messaged zone-entry discovery XP
+  end)
+end
 local xpWin = { delta = 0, attributed = 0 }
 local xpReconcileScheduled
+local xpPendingSince   -- GetTime() we first saw an un-matched (attribution-ahead-of-delta) reconcile; nil = none
 local function logAttributedXP(amount, ls)   -- log ONE attributed xp event (both logs) + count it in the window
   if not (amount and amount > 0) then return end
   if ns.LogEvent then ns.LogEvent("xp", { amount = amount, src = ls }) end
@@ -908,10 +945,48 @@ local function scheduleXPReconcile()
   C_Timer.After((HaulDB and HaulDB.xpReconcileDelay) or 0.5, function()
     xpReconcileScheduled = nil
     local remainder = xpWin.delta - xpWin.attributed
+    if remainder < 0 then
+      -- Attribution landed before its PLAYER_XP_UPDATE — the bar update lagged into a later reconcile
+      -- window (common in instances). Carry the un-matched attribution so the incoming delta cancels it,
+      -- instead of resetting and booking that delta as a phantom "other" (see the split-kill trace
+      -- 2026-07-29). Bounded to ~2s so a chat line that never mirrors to the bar can't wedge the window.
+      local now = GetTime and GetTime() or 0
+      xpPendingSince = xpPendingSince or now
+      if now - xpPendingSince < 2 then
+        xpWin.delta, xpWin.attributed = 0, -remainder   -- hold the un-matched attribution; the delta will cancel it
+        scheduleXPReconcile()
+        return
+      end
+    end
+    xpPendingSince = nil
+    -- A positive leftover is unexplained bar movement. Default label is "other" (a quest turn-in's own
+    -- "You gain N" line, bonus objectives, rested bonus). EXCEPTION: the FIRST surplus after crossing a zone
+    -- boundary is un-messaged zone-entry discovery XP — a new area credits the bar with no chat line (common
+    -- in special leveling instances), so it surfaces here as the next event's leftover. Label it "disc" for
+    -- the zone so it rolls into the Discovery bucket instead of the mystery "other" one. Computing the leftover
+    -- as delta-minus-attributed keeps double-counting impossible either way (the quest line is never booked
+    -- per-line — that was the old double-count).
+    local nowT = GetTime and GetTime() or 0
+    local asDisc = remainder > 0 and zoneDiscoveryPending and (nowT - lastZoneChangeAt) < 600
+    if remainder > 0 then zoneDiscoveryPending = false end   -- consume the one zone-entry slot
     xpWin.delta, xpWin.attributed = 0, 0
-    if remainder > 0 then   -- rested bonus / unattributed XP with no chat line -> its own "other" entry
-      if ns.LogEvent then ns.LogEvent("xp", { amount = remainder, src = { t = "other" } }) end
-      appendXPLog(remainder, { t = "other" })
+    if remainder > 0 then
+      local src = asDisc and { t = "disc", zone = lastZoneName } or { t = "other" }
+      if ns.LogEvent then ns.LogEvent("xp", { amount = remainder, src = src }) end
+      appendXPLog(remainder, src)
+      local s = ns.session
+      if s and s.running then
+        if asDisc then
+          s.xpDiscovery = (s.xpDiscovery or 0) + remainder
+          s.xpZones = s.xpZones or {}
+          s.xpZones[lastZoneName] = (s.xpZones[lastZoneName] or 0) + remainder
+        else
+          s.xpOther = (s.xpOther or 0) + remainder
+          s.xpOtherLog = s.xpOtherLog or {}
+          s.xpOtherLog[#s.xpOtherLog + 1] = { amount = remainder, t = time() }
+        end
+        if ns.RefreshUI then ns.RefreshUI() end
+      end
     end
   end)
 end
@@ -965,12 +1040,11 @@ end
 -- Quest-turn-in XP: QUEST_TURNED_IN(questID, xpReward, moneyReward) hands us the quest's XP reward directly.
 -- It is a labeled SUBSET of the PLAYER_XP_UPDATE total (like discovery) — recorded for the source breakdown,
 -- NOT re-added to s.xp. xpReward is the BASE reward (rested doubling lands in the "Other" residual).
-local lastQuestXPAt = 0   -- GetTime() of the last quest turn-in — lets the unnamed-XP handler skip the quest's
-                          -- own "You gain N experience." line (which would otherwise be booked as "Other")
+-- (The quest's own "You gain N experience." line is no longer skipped by a timestamp — it's simply never
+--  booked as "other", so the reconcile leftover is correct regardless of event order. See onXPGainMsg.)
 local function onQuestXP(xpReward, questID)
   local amt = tonumber(xpReward)
   if not (amt and amt > 0) then return end
-  lastQuestXPAt = GetTime()
   local title = questID and C_QuestLog and C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(questID)
   -- ALWAYS carry the quest ID alongside the title (the ID is the stable identity; GECQuest owns the fuller record)
   logAttributedXP(amt, { t = "quest", id = tonumber(questID) or nil, title = title }); scheduleXPReconcile()   -- ONE attributed xp event
@@ -1064,19 +1138,13 @@ local function onXPGainMsg(msg)
     nn.xp = nn.xp + uAmt; nn.count = nn.count + 1
     mdbg(("gather xp +%d (%s)"):format(uAmt, node))
     if ns.RefreshUI then ns.RefreshUI() end
-  elseif (now - lastQuestXPAt) < 2 then
-    return   -- this is the quest turn-in's own XP line; already counted via QUEST_TURNED_IN (avoid double-count)
-  else
-    -- OTHER: bonus objective / anything unattributed — recorded with a timestamp so it can be reviewed later
-    logAttributedXP(uAmt, { t = "other" }); scheduleXPReconcile()   -- ONE attributed xp event (bonus objective / unnamed)
-    local s = ns.session
-    if not (s and s.running) then return end
-    s.xpOther = (s.xpOther or 0) + uAmt
-    s.xpOtherLog = s.xpOtherLog or {}
-    s.xpOtherLog[#s.xpOtherLog + 1] = { amount = uAmt, t = time() }   -- timestamped (Other accordion children)
-    mdbg(("other xp +%d"):format(uAmt))
-    if ns.RefreshUI then ns.RefreshUI() end
+    return
   end
+  -- Any OTHER unnamed line — a quest turn-in's own "You gain N" line, a bonus objective, a rested bonus —
+  -- is NOT booked here. The XP-window reconcile books the true leftover (delta - attributed) as "other",
+  -- so it can never double-count: booking it per-line was the bug (a quest's line landed as "other" AND
+  -- its QUEST_TURNED_IN as "quest" — see the 2026-07-31 XP trace). Just nudge the reconcile.
+  scheduleXPReconcile()
 end
 ns._onXPGainMsg = onXPGainMsg   -- referenced from the CHAT_MSG_COMBAT_XP_GAIN dispatch
 
@@ -1422,6 +1490,41 @@ local function ZonePathNow()
   return (#parts > 0) and table.concat(parts, " > ") or (GetZoneText() or "")
 end
 
+-- Batch identity: rows gained in the same acquisition "beat" (a chest of many items, a quest turn-in awarding
+-- several currencies + reps) share one bid, so {<cat>.last.list} / .cycle can render the whole event.
+-- The bid is stamped on every s.log row at write time (see the appenders). A new batch starts when an explicit
+-- opener fires (BeginBatch, held between LOOT_OPENED/LOOT_CLOSED and around a turn-in) OR, for opener-less
+-- streams, when more than HaulDB.batchGap seconds pass since the previous logged row.
+function ns.BeginBatch(hold)
+  local s = ns.session; if not s then return nil end
+  s.batchSeq = (s.batchSeq or 0) + 1
+  s._batchHeld = hold and s.batchSeq or nil
+  s._lastBatchT = (GetTime and GetTime()) or 0
+  return s.batchSeq
+end
+-- id (optional): if provided, only clears the hold when it still matches (a NEWER hold started by
+-- a later event, e.g. LOOT_OPENED firing inside a turn-in's 0.5s window, must not be released by a
+-- stale delayed EndBatch call meant for the earlier hold). Omit id for the old unconditional release
+-- (LOOT_CLOSED, which always pairs with the immediately-preceding LOOT_OPENED).
+function ns.EndBatch(id)
+  local s = ns.session; if not s then return end
+  if id ~= nil and s._batchHeld ~= id then return end
+  s._batchHeld = nil
+  s._lastBatchT = (GetTime and GetTime()) or 0
+end
+function ns.CurrentBatch()
+  local s = ns.session; if not s then return 0 end
+  local now = (GetTime and GetTime()) or 0
+  if s._batchHeld then s._lastBatchT = now; return s._batchHeld end
+  s.batchSeq = s.batchSeq or 0
+  local gap = (HaulDB and HaulDB.batchGap) or 0.3
+  if s.batchSeq == 0 or (now - (s._lastBatchT or 0)) > gap then
+    s.batchSeq = s.batchSeq + 1
+  end
+  s._lastBatchT = now
+  return s.batchSeq
+end
+
 -- Append a money row to the live session's s.log (chronological List view). Only while running.
 -- `from` tags the origin shown in the List ("mail" for mail gold; nil for looted/quest). Vendor money
 -- is NEVER appended here (it's log-only — see onPlayerMoney). Money rows are discriminated from item
@@ -1430,14 +1533,14 @@ function appendMoneyLog(kind, amount, from, ls)
   local s = ns.session
   if not (amount and amount > 0 and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = kind, amount = amount, from = from, src = ls, t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = kind, amount = amount, from = from, src = ls, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- rep change (signed) into the session log
 function appendRepLog(faction, amount)
   local s = ns.session
   if not (faction and amount and amount ~= 0 and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = "rep", f = faction, amount = amount, t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = "rep", f = faction, amount = amount, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- currency change (signed) into the session log. Gains AND spends are recorded for the stream; only
 -- gains are surfaced (see onCurrencyUpdate / Replay) — spends are log-only, like vendor money.
@@ -1445,7 +1548,7 @@ function appendCurrencyLog(id, amount)
   local s = ns.session
   if not (id and amount and amount ~= 0 and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = "currency", cid = id, amount = amount, t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = "currency", cid = id, amount = amount, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- profession skill-up into the session log. Skill-ups only ever go up; recorded for the chronological
 -- stream + reconstruction. `name`/`prof`/`level` are captured so the display resolves even offline.
@@ -1453,7 +1556,7 @@ function appendProfLog(id, amount, name, prof, level)
   local s = ns.session
   if not (id and amount and amount > 0 and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = "skill", pid = id, amount = amount, name = name, prof = prof, lvl = level, t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = "skill", pid = id, amount = amount, name = name, prof = prof, lvl = level, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- experience into the session log — all kind="xp". A row with no `src` is the authoritative TOTAL; a row with
 -- `src` (t=kill/gather/disc/quest/other + name/node/zone/title) is a labeled subset. All go in the stream so a
@@ -1464,7 +1567,7 @@ function appendXPLog(amount, ls)
   local s = ns.session
   if not (amount and amount > 0 and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = "xp", amount = amount, src = ls, t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = "xp", amount = amount, src = ls, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- a kill into the session log (kind "kill"; carries npcID + display name + corpse GUID for the Kills views
 -- and full reconstruction).
@@ -1472,7 +1575,7 @@ function appendKillLog(id, name, guid)
   local s = ns.session
   if not (id and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = "kill", id = id, name = name, guid = guid, t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = "kill", id = id, name = name, guid = guid, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- Per-mob / per-node attribution events (mobloot / mobcash / looted / gatherloot). Written to BOTH the always-on
 -- log (reconstruct-from-log) AND the session drop log (saved-session snapshots), so the Data tab rebuilds the
@@ -1488,6 +1591,7 @@ function ns._logMobEvent(kind, fields)
   -- shared store stamp so it can never be forgotten again — see [[node-map-data]].
   local e = { kind = kind, t = time(), loc = CurrentLocation() }
   if fields then for k, v in pairs(fields) do e[k] = v end end
+  e.bid = ns.CurrentBatch()
   s.log[#s.log + 1] = e
 end
 -- vendor transaction into the session log (log-only: recorded for the stream, never shown/counted)
@@ -1495,7 +1599,7 @@ function appendVendorLog(vt, amount)
   local s = ns.session
   if not (amount and amount > 0 and s and s.running) then return end
   s.log = s.log or {}
-  s.log[#s.log + 1] = { kind = "vendor", vt = vt, amount = amount, from = "vendor", t = time(), loc = CurrentLocation() }
+  s.log[#s.log + 1] = { kind = "vendor", vt = vt, amount = amount, from = "vendor", t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 -- a COMPLETE mail-gold pickup into the session log (label/sender/subject/seq), so Replay rebuilds the
 -- itemized Mailbox lines from s.log alone — the log is the source of truth for the Mailbox sub-group.
@@ -1504,7 +1608,7 @@ function appendMailGoldLog(amount, label, sender, subject, seq)
   if not (amount and amount > 0 and s and s.running) then return end
   s.log = s.log or {}
   s.log[#s.log + 1] = { kind = "mail", amount = amount, from = "mail", label = label,
-    sender = sender, subject = subject, seq = seq, t = time(), loc = CurrentLocation() }
+    sender = sender, subject = subject, seq = seq, t = time(), loc = CurrentLocation(), bid = ns.CurrentBatch() }
 end
 
 -- Three location tiers for the {zone.*} tokens: region (continent) / zone / sub-zone.
@@ -1531,86 +1635,113 @@ end
 -- the entry's .id stays the numeric item ID for EvalItem/pricing/exclude.
 function ns.AddLoot(itemLink, count, src)
   if not itemLink then return end
-  local id = GetItemInfoInstant(itemLink)
+  local id = GetItemInfoInstant(itemLink)   -- synchronous (from the link), works even for an uncached item
   if not id then return end
   count = count or 1
-  -- Freeze the POINT-IN-TIME valuation so the Data view can be reproduced from the log alone (prices
-  -- fluctuate, so the resolved value must be captured here, not recomputed later). Embedded on BOTH the
-  -- always-on event log AND the per-session drop log so each snapshot is self-reconstructable:
-  --   val = TOTAL stack value (unit×count, copper)   ps = price source+metric used (e.g. "tsm:dbminbuyout")
-  --   q   = quality                                  b  = soulbound (so gray/bound category rebuilds offline)
-  local nm, _, q, _, _, _, _, _, _, _, sell, _, _, bindType = GetItemInfo(itemLink)
-  -- gray (Poor) and bind-on-pickup items are ALWAYS vendor-priced here, mirroring EvalItem/ComputeStats: an
-  -- AH/TSM price is meaningless for them, and a mis-listed gray can hand back a garbage TSM DBMinBuyout (e.g.
-  -- an "all nines" buyout). Forcing vendor AT CAPTURE keeps the FROZEN stored value sane everywhere it's used
-  -- (raw log, reconstructed sessions, export) — GetUnitValue only falls back to vendor when TSM has NO value,
-  -- so it would otherwise bake the junk price in for a gray that happens to have one.
-  local v, ps
-  if q == 0 or bindType == 1 then
-    v, ps = (sell or 0), "vendor"
-  else
-    local psUsed
-    if ns.GetUnitValue then v, psUsed = ns.GetUnitValue(itemLink, sell) end
-    ps = psUsed or (ns.PriceSourceLabel and ns.PriceSourceLabel()) or nil   -- ACTUAL source used
-  end
-  local b = (bindType == 1) or nil
-  -- loot SOURCE (fish/kill/gather/chest/…) from GECLoot, distinct from `from` (acquisition context). GECLoot's
-  -- LOOT_ITEM stashed it in ns._lootSrc[id] a beat ago (LOOT_SLOT_CLEARED fires before this CHAT_MSG_LOOT).
+  -- Capture the TIME-SENSITIVE context synchronously, so it survives an async item-load defer (below):
+  -- the loot-SOURCE descriptor from GECLoot (ns._lootSrc[id], 3s window; LOOT_SLOT_CLEARED fires before this
+  -- CHAT_MSG_LOOT), the live session, the timestamp, the batch id, and the location/zone.
   local lse = ns._lootSrc and ns._lootSrc[id]
   local fresh = lse and (GetTime() - lse.at) < 3
   local lsDesc = fresh and { t = lse.t, npcID = lse.npcID, guid = lse.guid, node = lse.node, name = lse.name } or nil
-  -- always-on `loot` event, CANONICAL field vocabulary: name/count/val/src (no info record reaches this
-  -- CHAT_MSG_LOOT path, so we map scalars directly — `name` from the GetItemInfo fetch above). `val` = the
-  -- TOTAL stack value (unit v × count), signed; `v` (unit) rides along in extra for display. `src` carries the
-  -- full loot-source DESCRIPTOR (Replay derives the per-mob/node breakdown from it); `from` tags the acquisition
-  -- source ("mail"/"craft"), absent for normal loot. `b`/`ps`/`from` are Haul extras (ride to server `extra`).
-  -- No unit `v` field: `val` is the TOTAL stack value; unit = `val/count` if ever needed (no short-name keys).
-  if ns.LogEvent then ns.LogEvent("loot", { id = id, name = nm, link = itemLink, count = count, q = q, src = lsDesc,
-    val = (v or 0) * count, from = src, b = b, ps = ps }) end
-  if GECStore and GECStore.Note then GECStore.Note("item", id) end   -- snapshot id->name into the shared registry (uniform display + export)
-  -- vendor purchases are LOG-ONLY: never added to the session items/log/waypoints/notify, never
-  -- counted, never shown in the window. (Fixes the bug where a bought item showed up as loot.)
-  if src == "vendor" then return end
   local s = ns.session
-  if not s or not s.running then return end
-  local key = src and (id .. "@" .. src) or id
-  local e = s.items[key]
-  if e then e.count = e.count + count
-  else
-    s.seq = (s.seq or 0) + 1
-    -- entry `from` = ACQUISITION context (nil/"mail"/"craft"), matching s.log's `from`; the loot-SOURCE type
-    -- is not stored here (Replay rebuilds it into `src` from the drop-log `src` descriptor's `.t` for display).
-    s.items[key] = { id = id, link = itemLink, count = count, seq = s.seq, from = src }
-  end
+  local atT = time()
+  local batch = ns.CurrentBatch and ns.CurrentBatch()
   local loc = CurrentLocation()
-  -- chronological loot log: one entry per loot event, with full location (drives the List view; the
-  -- location + frozen value/source ride along for the exported drop list and offline reconstruction)
-  s.log = s.log or {}
-  s.log[#s.log + 1] = { id = id, link = itemLink, count = count, t = time(), loc = loc, from = src, val = (v or 0) * count, q = q, b = b, ps = ps, src = lsDesc }
-  -- location waypoint with this loot's contribution (value computed lazily)
-  s.waypoints[#s.waypoints + 1] = {
-    t = time(), map = loc.map, x = loc.x, y = loc.y, zone = ZonePathNow(), id = id, count = count,
-  }
-  -- (removed: the last-captured item is no longer force-flashed in the notification line — it's available as
-  -- a {loot.last} token to place wherever the user wants; that spot by the category button is freed for a
-  -- future sort-order button. Session events — new/resume/merge/set-aside — still use ns.Notify.)
+  local zonePath = ZonePathNow()
+
+  -- Freeze the POINT-IN-TIME valuation so the Data view can be reproduced from the log alone (prices
+  -- fluctuate, so the resolved value is captured here, not recomputed later). Embedded on BOTH the always-on
+  -- event log AND the per-session drop log so each snapshot is self-reconstructable (val = TOTAL stack value
+  -- unit×count copper; ps = price source; q = quality; b = soulbound).
+  -- IMPORTANT: value is read from a LOADED item. GetItemInfo is async — on a cold item cache (e.g. a fresh /
+  -- secondary install with no TSM/Auctionator) it returns nil, and the vendor price would freeze at 0 (the
+  -- "all zeros on a new device" bug). So `record` runs only once the item is cached; see the dispatch below.
+  local function record()
+    local nm, _, q, _, _, _, _, _, _, _, sell, _, _, bindType = GetItemInfo(itemLink)
+    -- gray (Poor) and bind-on-pickup items are ALWAYS vendor-priced here (an AH/TSM price is meaningless for
+    -- them, and a mis-listed gray can hand back a garbage TSM DBMinBuyout). Otherwise use the configured
+    -- source, falling back to vendor when it has no value (GetUnitValue returns the ACTUAL source used).
+    -- NOTE: this is the same rule as ns.UnitValue and is deliberately NOT routed through it. This is the
+    -- ORIGIN site (it produces the frozen value everything downstream falls back to, so it has no frozenUnit
+    -- to pass), and it needs `ps` to fall back to PriceSourceLabel() when GetUnitValue reports no source,
+    -- which is a different fallback than ns.UnitValue's. Collapsing the two means unifying that provenance
+    -- label first; do it with the post-release pricing refactor, not in a release candidate.
+    local v, ps
+    if q == 0 or bindType == 1 then
+      v, ps = (sell or 0), "vendor"
+    else
+      local psUsed
+      if ns.GetUnitValue then v, psUsed = ns.GetUnitValue(itemLink, sell) end
+      ps = psUsed or (ns.PriceSourceLabel and ns.PriceSourceLabel()) or nil
+    end
+    local b = (bindType == 1) or nil
+    -- always-on `loot` event: val = TOTAL stack value (unit v × count); src = loot-source descriptor; from =
+    -- acquisition context ("mail"/"craft", nil for normal loot); b/ps ride to the server `extra`.
+    if ns.LogEvent then ns.LogEvent("loot", { id = id, name = nm, link = itemLink, count = count, q = q, src = lsDesc,
+      val = (v or 0) * count, from = src, b = b, ps = ps }) end
+    if GECStore and GECStore.Note then GECStore.Note("item", id) end   -- snapshot id->name into the shared registry
+    -- vendor purchases are LOG-ONLY: never added to the session items/log/waypoints (a bought item is not loot).
+    if src == "vendor" then return end
+    if not (s and s.running) then return end   -- s captured at loot time (attribute to the session it was looted in)
+    local key = src and (id .. "@" .. src) or id
+    local e = s.items[key]
+    if e then e.count = e.count + count
+    else
+      s.seq = (s.seq or 0) + 1
+      s.items[key] = { id = id, link = itemLink, count = count, seq = s.seq, from = src }
+    end
+    -- chronological loot log (drives the List view; frozen value/location/source ride along for offline rebuild)
+    s.log = s.log or {}
+    s.log[#s.log + 1] = { id = id, link = itemLink, count = count, t = atT, loc = loc, from = src, val = (v or 0) * count, q = q, b = b, bid = batch, ps = ps, src = lsDesc }
+    s.waypoints[#s.waypoints + 1] = { t = atT, map = loc.map, x = loc.x, y = loc.y, zone = zonePath, id = id, count = count }
+  end
+
+  -- Value from a LOADED item so the frozen vendor price is never a cold-cache 0. Cached (the common case) →
+  -- record synchronously, byte-identical to before. Uncached → reading the item triggers the async load and
+  -- ContinueOnItemLoad fires within a frame or two, so we emit the loot event once with the real value.
+  local item = Item and Item.CreateFromItemLink and Item:CreateFromItemLink(itemLink)
+  if not item or item:IsItemDataCached() then record() else item:ContinueOnItemLoad(record) end
 end
 
 ---------------------------------------------------------------------- stats --
 -- Evaluate one looted item: its name, quality, vendor/AH unit value, category
 -- ("gray"/"bound"/nil), display mode (show/merge/ignore), and excluded flag.
 -- Shared by the aggregated (Collection) and chronological (List) row builders.
-local function EvalItem(id, link, count)
+-- THE item pricing rule, in ONE place. Every site that turns an item into a per-unit value goes through
+-- here: EvalItem (display + ComputeStats), ns.BuildPriceSnapshot (what the SERVER sees), and the {last}
+-- token resolvers in Window.lua. It used to be written out separately at each of those, which is how the
+-- gray/BoP rule and the cold-cache guard ended up applied at some sites and not others.
+--
+--  * Gray (quality 0) and bind-on-pickup can ONLY be vendored, so an auction price is meaningless for them.
+--  * `frozenUnit` (optional) is the per-unit value captured at loot time from a LOADED item. When the live
+--    re-read returns 0 because the client hasn't cached the item, trust the captured value instead of
+--    freezing a spurious 0 (that path put 0g rows into HaulDB.history permanently).
+-- Returns unit, source.
+function ns.UnitValue(link, sellPrice, quality, bindType, frozenUnit)
+  local unit, source
+  if (quality or 1) == 0 or bindType == 1 then
+    unit, source = sellPrice or 0, "vendor"
+  else
+    unit, source = ns.GetUnitValue(link, sellPrice)
+  end
+  if (unit or 0) == 0 and (frozenUnit or 0) > 0 then unit, source = frozenUnit, (source or "vendor") end
+  return unit or 0, source or "vendor"
+end
+
+-- `frozenUnit` (optional) is the PER-UNIT value captured at loot time from a loaded item — pass it
+-- whenever the caller has it (Replay's e.unit, or an event's val/count).
+local function EvalItem(id, link, count, frozenUnit)
   local name, _, quality, _, _, _, _, _, _, _, sellPrice, _, _, bindType = GetItemInfo(link)
   quality = quality or 1
-  -- "can only vendor" categories: gray (Poor) and bind-on-pickup, always vendor-
-  -- priced (AH price is meaningless for them).
+  -- "can only vendor" categories: gray (Poor) and bind-on-pickup. The VALUE rule for them lives in
+  -- ns.UnitValue; `cat` here is the display/mode category (graysMode / boundMode).
   local cat
   if quality == 0 then cat = "gray"
   elseif bindType == 1 then cat = "bound" end
   local mode = (cat == "gray" and HaulDB.graysMode)
             or (cat == "bound" and HaulDB.boundMode) or "show"
-  local unit = cat and (sellPrice or 0) or (ns.GetUnitValue(link, sellPrice) or 0)
+  local unit = ns.UnitValue(link, sellPrice, quality, bindType, frozenUnit)
   return name, quality, unit, cat, mode, (HaulDB.excluded[id] and true or false)
 end
 ns.EvalItem = EvalItem
@@ -1629,18 +1760,209 @@ function ns.BuildPriceSnapshot(s)
     local id = e.id
     if id and not prices[id] and e.link then
       local _, _, quality, _, _, _, _, _, _, _, sellPrice, _, _, bindType = GetItemInfo(e.link)
-      quality = quality or 1
-      local unit, source
-      if quality == 0 or bindType == 1 then       -- gray / bind-on-pickup → vendor (AH price is meaningless)
-        unit, source = sellPrice or 0, "vendor"
-      else
-        unit, source = ns.GetUnitValue(e.link, sellPrice)
-      end
+      -- ONE pricing rule (ns.UnitValue): gray/BoP vendor-only, plus the cold-cache guard. This snapshot is
+      -- what the SERVER sees and it re-reads GetItemInfo at CLOSE, which returns nothing for an item not in
+      -- the client cache (a fresh or secondary install). Replay carries the value captured at loot time as
+      -- e.unit, so the guard falls back to that rather than freezing a spurious 0.
+      local unit, source = ns.UnitValue(e.link, sellPrice, quality, bindType, e.unit)
       prices[id] = { unit = math.floor(unit or 0), source = source or "vendor" }
     end
   end
   return prices
 end
+
+----------------------------------------------------------------- data repairs --
+-- A data repair is scoped to the BUILD WINDOW in which the bug could write bad data — NOT to "everything
+-- older than the fix". Those are different, and the difference matters: a bug can be INTRODUCED by one
+-- release and caught two releases later, in which case every build before it is innocent and must not be
+-- touched. 2026.07.26.1 never had the cold-cache zero. A repair for a bug introduced in 2026.08.02.1 and
+-- fixed in 2026.08.27.1 must skip 26.1 entirely and sweep only the builds in between.
+--
+-- Each repair declares a half-open window:
+--   introducedIn  FIRST build that could write the bad data.  nil = "since the beginning".
+--   fixedIn       FIRST build that can no longer write it.    nil = "not fixed yet — every later build too".
+-- In scope iff  introducedIn <= build < fixedIn.  Both ends go through the ONE CalVer comparator
+-- (GECStore Session.VerLE); a string compare gets "…18.10" vs "…18.3" backwards.
+--
+-- STATE (HaulDB.dataRepairs[id]) stores the WINDOW that was swept, not a bare "done" flag. If a repair's
+-- declared window later changes — the bug turns out to reach further back, or a second fix moves fixedIn —
+-- the stored window no longer matches the declared one and the repair re-runs over the new range. A boolean
+-- cannot express that, which is exactly how data gets permanently stranded on a player's machine.
+--
+-- Repairs are keyed by id and independent, so several can be in flight at once for different windows.
+local DATA_REPAIRS = {}
+function ns.RegisterDataRepair(def) DATA_REPAIRS[#DATA_REPAIRS + 1] = def end
+
+-- Build a scope test for one repair: suspect(sid, ownStamp) -> is this row inside the bug's window?
+-- Returns nil when the comparator isn't loaded yet (older GECStore embed), so the caller can bail WITHOUT
+-- recording the repair as done. Never hand-roll a second version compare here — that duplication is the
+-- exact drift these repairs exist to clean up after.
+function ns.RepairScope(def)
+  local S = LibStub and LibStub.GetLibrary and LibStub:GetLibrary("GECStore-1.0", true)
+  local verLE = S and S.Session and S.Session.VerLE
+  if not verLE then return nil end
+  -- Resolve the build that WROTE a row. Prefer the row's own stamp (self-describing, survives a purge of the
+  -- GECStore header); fall back to the session header's creating build (builds[1]) for rows saved before the
+  -- stamp existed.
+  local sessions = HaulData and HaulData.sessions
+  return function(sid, ownStamp)
+    local b = ownStamp
+    if not b then
+      local rec = sid and sessions and sessions[sid]
+      b = rec and rec.builds and rec.builds[1] or nil
+    end
+    -- UNKNOWN provenance: in scope by default. Fail-safe for a repair that can only raise a value; a repair
+    -- that could LOWER or rewrite data should set unknownIsSuspect = false and leave unknowns alone.
+    if not b then return def.unknownIsSuspect ~= false end
+    if def.introducedIn and not verLE(def.introducedIn, b) then return false end   -- b < introducedIn
+    if def.fixedIn and verLE(def.fixedIn, b) then return false end                 -- b >= fixedIn
+    return true
+  end
+end
+
+local function repairWindowDone(def)
+  local st = HaulDB.dataRepairs and HaulDB.dataRepairs[def.id]
+  return st ~= nil and st.introducedIn == def.introducedIn and st.fixedIn == def.fixedIn
+end
+local function markRepairDone(def)
+  HaulDB.dataRepairs = HaulDB.dataRepairs or {}
+  HaulDB.dataRepairs[def.id] = { introducedIn = def.introducedIn, fixedIn = def.fixedIn, at = time() }
+end
+
+-- Run every registered repair whose declared window hasn't been swept yet. Called once at login.
+function ns.RunDataRepairs()
+  if not HaulDB then return end
+  -- Clear the two pre-registry flags. Neither is honored: the boolean `zeroValueRepair` burned once and
+  -- could never re-run (so it may have left items unrepaired), and `zeroValueRepairThrough` only ever
+  -- existed on unreleased dev builds. Letting the windowed repair sweep once more is the point, and it is
+  -- idempotent and raise-only, so a redundant pass costs nothing.
+  HaulDB.zeroValueRepair = nil
+  HaulDB.zeroValueRepairThrough = nil
+  for _, def in ipairs(DATA_REPAIRS) do
+    if not repairWindowDone(def) then
+      local scope = ns.RepairScope(def)
+      if scope then def.run(scope, def) end   -- def.run marks itself done when the sweep completes
+    end
+  end
+end
+
+-- Repair: zeroed item values. Back-fill from the (static) VENDOR price for data written inside the window.
+-- Cold-cache captures froze 0 for items GetItemInfo hadn't cached yet; the item id + count are still stored,
+-- so we recompute the vendor price now (loading each item once, so the repair can't repeat the cold-cache
+-- mistake) and patch the saved sessions (items[] display + drops[] log) AND the event log, then adjust each
+-- touched session's frozen counted/gross totals by the exact delta. Only ever RAISES a stored 0.
+--
+-- Window: introducedIn = nil (broken from the very first build) … fixedIn = 2026.08.04.1, the first PUBLIC
+-- build in which every pricing site goes through ns.UnitValue and therefore carries the cold-cache guard.
+--
+-- fixedIn names a RELEASED build on purpose. The guard first appeared in an unreleased dev build, and
+-- pointing the window at a version no player ever ran makes the boundary unverifiable — you cannot look it
+-- up in the release history. Naming the first public build is provable, and the cost of the slightly wider
+-- window is nil: the repair is idempotent and only ever RAISES a stored 0, so re-sweeping a handful of
+-- already-clean dev builds changes nothing.
+local ZERO_VALUES_REPAIR = { id = "zero-item-values", introducedIn = nil, fixedIn = "2026.08.04.1" }
+
+-- Raise a session record's frozen price for ONE item, and only when it is genuinely missing/zero — this is
+-- a repair, never a re-price, so a snapshot that already carries a real number is left exactly as it was.
+local function repairPrice(sid, id, sell)
+  if not (sid and id and sell and sell > 0) then return end
+  local rec = HaulData and HaulData.sessions and HaulData.sessions[sid]
+  if not rec then return end
+  rec.prices = rec.prices or {}
+  local cur = rec.prices[id]
+  if cur and (cur.unit or 0) > 0 then return end
+  rec.prices[id] = { unit = math.floor(sell), source = "vendor" }
+end
+
+function ns.RepairZeroValues(suspect, def)
+  def = def or ZERO_VALUES_REPAIR
+  local byId = {}
+  local function want(id) local p = byId[id]; if not p then p = {}; byId[id] = p end; return p end
+  local ev = HaulData and HaulData.streams and HaulData.streams.events
+  if ev then
+    for _, e in ipairs(ev) do
+      local id = (e.k == "loot") and tonumber(e.id)
+      if id and (e.val or 0) <= 0 and suspect(e.sid) then local p = want(id); p[#p + 1] = { kind = "ev", e = e } end
+    end
+  end
+  for _, h in ipairs(HaulDB.history or {}) do
+    if suspect(h.sid, h.build) then
+      for _, it in ipairs(h.items or {}) do
+        local id = tonumber(it.id)
+        if id and (it.unit or 0) <= 0 then local p = want(id); p[#p + 1] = { kind = "item", it = it, h = h } end
+      end
+      for _, d in ipairs(h.drops or {}) do
+        local id = tonumber(d.id)
+        if id and (d.val or 0) <= 0 then local p = want(id); p[#p + 1] = { kind = "drop", d = d } end
+      end
+    end
+  end
+  local ids = {}
+  for id in pairs(byId) do ids[#ids + 1] = id end
+  if #ids == 0 then markRepairDone(def); return end
+  local remaining, fixed, dirtyH = #ids, 0, {}
+  local function finish()
+    for h, delta in pairs(dirtyH) do
+      h.grossValue = math.floor((h.grossValue or 0) + delta.gross)
+      h.countedValue = math.floor((h.countedValue or 0) + delta.counted)
+      -- goldPerHour is a THIRD frozen field derived from the two above (SnapshotSession). Raising the
+      -- haul without it leaves the Data-tab row rendering "haul 150g ... g/hr 12g" on one line — a pair
+      -- of numbers that cannot both be true. Same rule as Replay's (counted / hours), no new formula.
+      if (h.durationSec or 0) > 0 then
+        h.goldPerHour = math.floor((h.countedValue or 0) / (h.durationSec / 3600))
+      end
+    end
+    -- Record the WINDOW swept, not a bare "done" — stamped only after every item in this pass has reported
+    -- back, so the range is genuinely covered. Widening the window later re-runs the repair automatically.
+    markRepairDone(def)
+    if fixed > 0 then ns._dirty = true; if ns.RefreshUI then ns.RefreshUI() end end
+    if fixed > 0 then ns.Print(("repaired %d zeroed item value(s) from vendor prices"):format(fixed)) end
+  end
+  for _, id in ipairs(ids) do
+    local function patch()
+      local sell = select(11, GetItemInfo(id))
+      if sell and sell > 0 then
+        for _, p in ipairs(byId[id]) do
+          if p.kind == "ev" and (p.e.val or 0) <= 0 then
+            p.e.val = sell * (p.e.count or 1); fixed = fixed + 1
+            -- An item's value is persisted in FOUR places (see the repair's doc block): the event, the
+            -- saved row's drops[], its items[], and the session record's frozen price snapshot. That
+            -- fourth one is the ONLY copy reduceSegment reads (it never consults e.val), so leaving it
+            -- at 0 means a Combine of a repaired session re-prices it back to nothing and the combined
+            -- row comes out worth LESS than the source row sitting right above it. Move all four.
+            repairPrice(p.e.sid, id, sell)
+          elseif p.kind == "drop" and (p.d.val or 0) <= 0 then
+            p.d.val = sell * (p.d.count or 1); fixed = fixed + 1
+          elseif p.kind == "item" and (p.it.unit or 0) <= 0 then
+            local add = sell * (p.it.count or 1)
+            p.it.unit, p.it.total = sell, add; fixed = fixed + 1
+            repairPrice(p.h.sid, id, sell)
+            local dh = dirtyH[p.h]; if not dh then dh = { gross = 0, counted = 0 }; dirtyH[p.h] = dh end
+            -- Adjust the frozen totals by EXACTLY the rule ComputeStats / Replay.Rebuild / reduceSegment use,
+            -- or the repair silently rewrites history to something no other authority agrees with:
+            --   * from == "mail" is informational and belongs in NEITHER gross nor counted (a returned
+            --     auction listing is not new income). Adding it to gross permanently inflates the session.
+            --   * from == "craft" is counted only when the one-off `keep` is set, NOT by `excluded`.
+            -- Saved item rows carry both `from` and `keep` (see SnapshotSession), so use them.
+            if p.it.from ~= "mail" then
+              dh.gross = dh.gross + add
+              local inHaul
+              if p.it.from == "craft" then inHaul = p.it.keep and true or false
+              else inHaul = not p.it.excluded end
+              if inHaul then dh.counted = dh.counted + add end
+            end
+          end
+        end
+      end
+      remaining = remaining - 1
+      if remaining == 0 then finish() end
+    end
+    local item = Item and Item.CreateFromItemID and Item:CreateFromItemID(id)
+    if not item or item:IsItemDataCached() then patch() else item:ContinueOnItemLoad(patch) end
+  end
+end
+ZERO_VALUES_REPAIR.run = ns.RepairZeroValues
+ns.RegisterDataRepair(ZERO_VALUES_REPAIR)
 
 -- Returns the live computed session stats + sorted item rows (Collection view).
 function ns.ComputeStats()
@@ -1658,7 +1980,7 @@ function ns.ComputeStats()
   local sItems = (s and s.items) or {}
   for _, e in ipairs(rebuilt.items) do
     local id = e.id
-    local name, quality, unit, cat, mode, excluded = EvalItem(id, e.link, e.count)
+    local name, quality, unit, cat, mode, excluded = EvalItem(id, e.link, e.count, e.unit)
     local from = e.from   -- acquire: nil loot / "mail" / "craft"
     local key = e.key
     local keep = (sItems[key] and sItems[key].keep) and true or false
@@ -1735,6 +2057,9 @@ function ns.ComputeStats()
     elapsed = ns.Elapsed(), counted = counted, gross = gross, coin = coin,
     loot = counted - coin,   -- non-excluded item value only (haul minus gold)
     mailGold = mailGoldTotal, mailGoldRows = mailGoldRows,
+    -- No mailItems here on purpose: the {mail.items} token was removed (its name promised a count and it
+    -- returned money, contradicting {items} / {items.value}). Mail item value is shown by the Mail > Items
+    -- group header, which sums the same from=="mail" rows in Window.lua.
     vendor = rebuilt.vendor or { sell = 0, buy = 0, repair = 0 },   -- Vendor category ledger (informational)
     itemCount = itemCount, notable = notable, dropBase = dropBase,
     goldPerHour = counted / hours, grossPerHour = gross / hours,
@@ -1816,7 +2141,9 @@ function ns.LogRows()
         rows[#rows + 1] = { money = true, kind = k, amount = ev.amount or 0, from = ev.from, src = ev.src }
       end
     elseif ev.id then
-      local name, quality, unit, cat, mode, excluded = EvalItem(ev.id, ev.link, ev.count)
+      -- ev.val is the frozen TOTAL for ev.count units; the guard wants per-unit.
+      local frozen = (ev.val and ev.count and ev.count > 0) and (ev.val / ev.count) or nil
+      local name, quality, unit, cat, mode, excluded = EvalItem(ev.id, ev.link, ev.count, frozen)
       if not ((cat and mode == "ignore") or (excluded and exMode == "ignore")) then
         rows[#rows + 1] = {
           id = ev.id, link = ev.link, name = name, quality = quality,
@@ -1848,11 +2175,11 @@ function ns.Reset()
     -- clean session after the reload.
     ns.session = nil
     HaulDB.liveSession = nil
-    ns.Print("new session — reloading…"); ns.Notify("|cff80ff80new session|r")
+    ns.Print("new session, reloading…"); ns.Notify("|cff80ff80new session|r")
     if not ns.RequestReload() then
-      -- reload deferred (in combat / casting / looting): keep tracking with a fresh
-      -- session so income isn't dropped in the gap. It resumes by sid across the
-      -- eventual reload, so there's still no orphan.
+      -- reload SKIPPED (unsafe: combat / casting / looting) — we never defer a reload, since a
+      -- deferred reload fired from an event handler is taint-blocked. Keep tracking with a fresh
+      -- session so income isn't dropped; it flushes to disk on the next Save/logout. No orphan (sid).
       ns.session = NewSession()
       if ns.RefreshUI then ns.RefreshUI() end
     end
@@ -1894,6 +2221,11 @@ local function SnapshotSession()
     character = (s.character and s.character ~= "?" and s.character) or ns.CharName(),
     class = s.class or ns.CharClass(),   -- classFile, for class-colored names
     gen = (HaulData and HaulData._gen) or 0,   -- write-generation banked in; on disk once a later gen loads
+    -- The addon version that WROTE this row, so history is self-describing: a build-gated data repair or
+    -- migration can tell "was this written before the fix?" without joining through sid to the GECStore
+    -- session header (which may have been purged, and doesn't exist at all for pre-sid rows). Sessions
+    -- saved before this field existed have build = nil, which every gate must treat as "unknown, assume old".
+    build = Haul.BUILD,
 
     countedValue = math.floor(st.counted), grossValue = math.floor(st.gross),
     coin = math.floor(st.coin), itemCount = st.itemCount,
@@ -1941,10 +2273,26 @@ end
 -- pruned to logMaxEntries, so older sessions may be incomplete there). Returns the rebuilt layout.
 -- One session's lifecycle MARKERS (start/stop/pause/resume/fold/exclude) from the split markers stream.
 -- Replay needs these to derive timing + character; they no longer live inline in the events stream.
+-- sid -> {markers} index, maintained INCREMENTALLY. The markers stream is append-only and never pruned,
+-- so a per-call full scan (O(all markers ever), ≥1/sec via ComputeStats) degrades over weeks. We index
+-- only the newly-appended markers each call (O(delta)); a full rebuild happens only on first use or if the
+-- stream shrank (a prune/migration). Existing markers are indexed by REFERENCE, so an in-place end-time
+-- mutation (pause close) is reflected without reindexing.
+local sidMarkerIndex, sidMarkerIndexLen = nil, 0
 function ns.SidMarkers(sid)
-  local out = {}
   local ms = HaulData and HaulData.streams and HaulData.streams.markers
-  if ms then for _, m in ipairs(ms) do if m.sid == sid then out[#out + 1] = m end end end
+  if not ms then return {} end
+  local n = #ms
+  if sidMarkerIndex == nil or n < sidMarkerIndexLen then sidMarkerIndex, sidMarkerIndexLen = {}, 0 end
+  for i = sidMarkerIndexLen + 1, n do
+    local m = ms[i]; local k = m and m.sid
+    if k then local t = sidMarkerIndex[k]; if not t then t = {}; sidMarkerIndex[k] = t end; t[#t + 1] = m end
+  end
+  sidMarkerIndexLen = n
+  local src = sidMarkerIndex[sid]
+  if not src then return {} end
+  local out = {}
+  for i = 1, #src do out[i] = src[i] end   -- copy: callers must not mutate the shared index
   return out
 end
 
@@ -1980,11 +2328,40 @@ function ns.SaveSession()
 end
 
 -- True when the live session has anything worth keeping (loot or coin change).
+-- CANONICAL "is this run worth banking?" predicate — every bank point routes through here.
+--
+-- It asks the EVENT LOG, not a hand-written list of categories. s.log is written ONLY by the income
+-- recorders (coin, rep, currency, skill, xp, kill, vendor, mail, loot) and carries no start/stop/pause
+-- markers, so "the log has an entry" is exactly "this session recorded something". Checking a fixed set
+-- of fields instead is what lost whole sessions: the old body tested coin and items and nothing else, so
+-- a battleground hour, an auto-vendored dungeon run, a crafting session or a mailbox of AH gold all
+-- evaluated false at all five bank points and were discarded with "nothing to save".
+--
+-- DO NOT re-enumerate categories here. A new tracked type that writes to s.log is covered for free; one
+-- that does not write to s.log is the bug (see the new-tracked-type checklist).
+-- DECISION (2026-08-04, product owner, do NOT "fix" this back):
+-- ANYTHING RECORDED IS WORTH BANKING. If a kind is tracked well enough to have its own category tab
+-- (Loot / Mail / Vendor / Rep / Currency / Skills / XP / Kills — see Window.lua CATS and Sessions.lua
+-- DATA_CATS), then a run containing ONLY that kind is a real session and must bank. A vendor-only trip is
+-- a session you may well want to look back at; "it doesn't count toward the haul" is a statement about the
+-- TOTALS, not about whether the run is worth keeping.
+--
+-- This was briefly implemented the other way — a LOG_ONLY_KINDS skip that refused to bank a vendor-only or
+-- currency-spend-only run, on the theory that an all-zero-haul history row was noise. That is wrong: it
+-- silently discarded the only copy of that run's Vendor tab. Haul's whole point is tracking what happened
+-- over time, and gold-per-hour is one readout of that, not the definition of it.
+--
+-- So the predicate stays maximally permissive: the event log is written ONLY by the recorders, and every
+-- recorder feeds a category tab, so "the log has an entry" IS "this session recorded something worth
+-- keeping". A run that reads as zero HAUL but carries vendor or currency detail is a correct, useful row.
+-- If a banked row ever needs to be visually distinguished from a farming run, that is a DISPLAY concern
+-- (label it, badge it, keep it out of per-hour averages) and must not be solved by refusing to bank it.
 function ns.SessionHasData()
   local s = ns.session
   if not s then return false end
   if ns.Coin() ~= 0 then return true end
-  return next(s.items) ~= nil
+  if next(s.items) ~= nil then return true end
+  return next(s.log or {}) ~= nil
 end
 
 -- Append the current session to history WITHOUT the Save side effects (no reload,
@@ -2058,14 +2435,18 @@ function ns.ResumeFromHistory(i)
         uid = h.uid, sid = h.sid, class = h.class } }
       return m
     end)(),
-    character = h.character or ns.CharName(), class = h.class,   -- keep who originally ran it
+    -- The RESUMING (current) character owns the live session — so the "session never crosses characters"
+    -- safety net (PLAYER_ENTERING_WORLD guard) does NOT force-close an intentional resume. The original
+    -- runner is preserved in the resume provenance above (merges[].from.character/.class), so the record
+    -- stays auditable: old items -> original character, new items -> resumer. (Per-item attribution UI TBD.)
+    character = ns.CharName(), class = ns.CharClass(),
   }
   if ns.BeginSession then ns.BeginSession(ns.session) end   -- fresh live sid for the resumed run
   do local S = ns.SessionCtrl and ns.SessionCtrl(); if S and h.sid then S:Fold(h.sid, "resume") end end
   h.absorbed = true; h.absorbedInto = ns.session.sid   -- fade the resumed-from source + tag it, same as a rebuild
   if ns.SeedAggregates and ns.Replay then ns.SeedAggregates(ns.session, ns.Replay.Rebuild(ns.session.log)) end
   if ns.RefreshUI then ns.RefreshUI() end
-  ns.Print("|cff80ff80resumed a saved session — the current run was banked first|r")
+  ns.Print("|cff80ff80resumed a saved session; the current run was banked first|r")
   ns.Notify("|cff80ff80session resumed|r")
   return true
 end
@@ -2537,7 +2918,7 @@ local function CheckInstanceTransition()
       ns.session = NewSession()                                    -- start B (instance; Begin inside)
       ns.instLabel = (instType == "scenario") and "scenario" or "instance"
       ns.Print("|cff80ff80Entering " .. ns.instLabel
-        .. "|r — your session is paused & set aside; tracking the " .. ns.instLabel .. " fresh.")
+        .. "|r: your session is paused & set aside; tracking the " .. ns.instLabel .. " fresh.")
       ns.Notify("|cff80ff80" .. ns.instLabel .. ": previous session set aside|r")
     else
       -- LEAVE: SAVE the instance run to Saved Sessions, then RESUME the set-aside
@@ -2555,13 +2936,13 @@ local function CheckInstanceTransition()
         -- resume A only if it actually un-pauses; a manually-paused A stays paused
         -- (its excluded span stays open) so the log keeps matching the live state
         if side.sid and side.running and ns.LogResume then ns.LogResume(side.sid) end
-        ns.Print("|cff80ff80Left " .. label .. "|r — "
+        ns.Print("|cff80ff80Left " .. label .. "|r: "
           .. (saved and (label .. " session saved") or "nothing to save")
           .. "; resumed your previous session.")
         ns.Notify("|cff80ff80resumed previous session|r")
       else
         ns.session = NewSession()
-        ns.Print("|cff80ff80Left " .. label .. "|r — "
+        ns.Print("|cff80ff80Left " .. label .. "|r: "
           .. (saved and (label .. " session saved") or "nothing to save") .. "; tracking fresh.")
         ns.Notify("|cff80ff80left " .. label .. "|r")
       end
@@ -2580,17 +2961,21 @@ end
 local function DoZoneNewSession()
   if ns.SessionHasData and ns.SessionHasData() then ns.BankSession() end
   if ns.session and ns.session.sid and ns.LogStop then ns.LogStop(ns.session.sid) end
-  -- a zone change is a new session too, so honor "Reload before new session": reload BEFORE the
-  -- fresh session (born on load), same stop->reload->start shape as the manual New. If the reload
-  -- defers (unsafe), fall through to an immediate new session.
-  if HaulDB.reloadBeforeNewSession and ns.RequestReload then
-    ns.session = nil; HaulDB.liveSession = nil
-    ns.Notify("|cff80ff80new session — zone changed (reloading…)|r")
-    if ns.RequestReload() then return end
-  end
+  -- A zone change fires from an EVENT handler, where C_UI.Reload() is taint-blocked and can NEVER run
+  -- (reload-must-be-hardware-triggered doctrine). So we do NOT attempt "reload before new session" here:
+  -- RequestReload() returns true on SafeNow() WITHOUT actually reloading, and the old early-return then
+  -- left ns.session nil — tracking silently dead, income lost. Always start the fresh session. If a
+  -- reload-sync was wanted, flag it pending so the next hardware Save picks it up (the only path that
+  -- CAN reload). This keeps tracking alive across every zone change, prompt or not.
   ns.session = NewSession()
+  if HaulDB.reloadBeforeNewSession then
+    ns._syncPending = true
+    if ns.UpdateSaveEnabled then ns.UpdateSaveEnabled() end
+    ns.Notify("|cff80ff80zone changed: new session (press Save to sync)|r")
+  else
+    ns.Notify("|cff80ff80zone changed: new session|r")
+  end
   if ns.RefreshUI then ns.RefreshUI() end
-  ns.Notify("|cff80ff80new session — zone changed|r")
 end
 -- index directly into the existing global (a FrameXML base table); do NOT reassign it
 -- (StaticPopupDialogs = ...) — writing the global from addon code taints the StaticPopup system.
@@ -2633,6 +3018,8 @@ f:RegisterEvent("SCENARIO_UPDATE")          -- delves run on the scenario system
 f:RegisterEvent("CHAT_MSG_MONEY")
 f:RegisterEvent("PLAYER_MONEY")
 f:RegisterEvent("QUEST_TURNED_IN")   -- quest reward money (arg3 = copper); not a CHAT_MSG_MONEY
+f:RegisterEvent("LOOT_OPENED")       -- batch-id: holds one bid across a multi-item loot window (chest/corpse)
+f:RegisterEvent("LOOT_CLOSED")       -- batch-id: releases the held bid
 f:RegisterEvent("CHAT_MSG_COMBAT_FACTION_CHANGE")   -- reputation gains (per faction)
 f:RegisterEvent("CURRENCY_DISPLAY_UPDATE")           -- currency gained/spent (per currency type)
 f:RegisterEvent("PLAYER_XP_UPDATE")                  -- experience gained (total; delta of UnitXP)
@@ -2647,6 +3034,25 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
   if event == "ADDON_LOADED" and arg1 == ADDON then
     HaulDB = HaulDB or {}
     if ns.InitLog then ns.InitLog() end   -- HaulData ready before RestoreOrNew touches sessions
+    -- Exclusion-marker backfill (2026-07-26, the exclusion-marker migration
+    -- gap): HaulDB.excluded (the UI's global list) predates the markers
+    -- stream — and the seq rebaseline wiped any markers that DID exist — so
+    -- session records froze EMPTY exclusions while the in-game views still
+    -- greyed the items (the server counted them). Emit an exclude marker for
+    -- every listed id whose current marker state doesn't already say
+    -- excluded. Scan-first = idempotent every load, and it self-heals after
+    -- any future stream reset. Applies to sessions closed from NOW on;
+    -- already-frozen records stay as written (edit via the website's ignore).
+    do
+      local latest = {}
+      local mks = HaulData and HaulData.streams and HaulData.streams.markers
+      for _, m in ipairs(mks or {}) do
+        if (m.k == "exclude" or m.k == "include") and m.id then latest[m.id] = m.k end
+      end
+      for id in pairs(HaulDB.excluded or {}) do
+        if latest[id] ~= "exclude" and ns.LogExclude then ns.LogExclude(id, true) end
+      end
+    end
     HaulDB.themePreset = HaulDB.themePreset or "gruvbox"
     -- migrate old trashVendor bool -> graysMode dropdown
     if HaulDB.trashVendor ~= nil and HaulDB.graysMode == nil then
@@ -2716,13 +3122,25 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
       if n > 0 then ns.Print("|cffffaa44recovered " .. n .. " orphaned session(s)|r from the log (lifecycle re-derived from their events).") end
     end end
     ns.sidelined = UnpackSession(HaulDB.sidelined)   -- set-aside run, if mid-instance
+    if ns.RunDataRepairs then ns.RunDataRepairs() end   -- build-windowed data repairs (see DATA_REPAIRS)
   elseif event == "CHAT_MSG_MONEY" then
     onLootMoney(arg1)
   elseif event == "PLAYER_MONEY" then
     onPlayerMoney()
   elseif event == "QUEST_TURNED_IN" then
+    -- batch-id: a turn-in can award money+XP+rep+currency+items in one beat; hold one bid BEFORE the
+    -- money/XP appends below (they must land in the same batch as the rep/currency/item rewards that
+    -- follow), then release after a short window (no LOOT_CLOSED-style event exists for turn-ins).
+    -- Capture the held id so the delayed release can't clobber a NEWER hold (e.g. a LOOT_OPENED that
+    -- starts within the 0.5s window) — see ns.EndBatch's id-guard.
+    local qb = ns.BeginBatch and ns.BeginBatch(true)
     onQuestMoney(arg3, arg1)   -- arg3 = money reward, arg1 = questID
     if ns._onQuestXP then ns._onQuestXP(arg2, arg1) end   -- arg2 = XP reward, arg1 = questID
+    if C_Timer and C_Timer.After then C_Timer.After(0.5, function() if ns.EndBatch then ns.EndBatch(qb) end end) end
+  elseif event == "LOOT_OPENED" then
+    if ns.BeginBatch then ns.BeginBatch(true) end
+  elseif event == "LOOT_CLOSED" then
+    if ns.EndBatch then ns.EndBatch() end
   elseif event == "CHAT_MSG_COMBAT_FACTION_CHANGE" then
     onFactionRep(arg1)
   elseif event == "CURRENCY_DISPLAY_UPDATE" then
@@ -2768,20 +3186,19 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
     if ns.ApplyKeybinds then ns.ApplyKeybinds() end   -- apply the Keybinds-tab combos
     ns.ApplyFastLoot()                                 -- register/unregister Haul with the shared fast-loot lib + mirror debug
     if ns.StartFlush then ns.StartFlush() end
-    ns.Print("loaded v" .. tostring(Haul.BUILD) .. " — source: "
+    ns.Print("loaded v" .. tostring(Haul.BUILD) .. ", source: "
       .. Theme.Accent(HaulDB.priceSource) .. ". /haul for window."
       .. (Haul.IsDev and Haul.IsDev() and " /haul diag to test prices." or ""))   -- diag dispatch is dev-only (stripped in public)
   elseif event == "PLAYER_ENTERING_WORLD" then
     -- arg1 = isInitialLogin, arg2 = isReloadingUi. A TRUE fresh login (not /reload, not zoning)
     -- starts a BRAND-NEW session — /reload still resumes. The resumed previous run is banked to
     -- history first (if it has data) so nothing is lost.
-    if arg1 then
-      HaulDB._loginUnix = time()
+    -- Close the rolled-over run at its LAST ACTIVITY, not "now" — else its marker duration swallows
+    -- the whole offline gap (a run left open overnight would read ~13h). RepairIfDangling stops at
+    -- last event/marker ts + freezes; reason "logout" (a clean session boundary, NOT a crash). Falls
+    -- back to LogStop only if the controller isn't available. Then a brand-new session begins.
+    local function closeRolledOver()
       if ns.SessionHasData and ns.SessionHasData() then ns.BankSession() end
-      -- The prior run spanned a logout (a session = login→logout). Close it at its LAST ACTIVITY, not
-      -- "now" — else its marker duration swallows the whole offline gap (a run left open overnight would
-      -- read ~13h). RepairIfDangling stops at last event/marker ts + freezes; reason "logout" (a clean
-      -- session boundary, NOT a crash). Falls back to LogStop only if the controller isn't available.
       if ns.session and ns.session.sid then
         local S = ns.SessionCtrl and ns.SessionCtrl()
         if S and S.RepairIfDangling then
@@ -2791,6 +3208,22 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
       ns.session = NewSession()
       ns._lastTiers = nil   -- re-baseline the zone tiers after a fresh login
       if ns.RefreshUI then ns.RefreshUI() end
+    end
+    if arg1 then
+      HaulDB._loginUnix = time()
+      closeRolledOver()
+    else
+      -- RULE (2026-07-26): a session NEVER crosses characters — merge/resume are the only sanctioned
+      -- cross-character flows. Safety net for a character switch that did NOT read as an initial login
+      -- (seen live: Resta farmed 651 events into Kalomat's session because the arg1 branch never ran):
+      -- whatever the flags said, an open session created by a DIFFERENT character closes at ITS last
+      -- activity — the creator keeps the credit — and a fresh session begins for the current character.
+      -- Same-character zoning is a no-op (names match), so this runs safely on every world entry.
+      local cur = ns.CharName and ns.CharName() or nil
+      local creator = ns.session and ns.session.character
+      if cur and creator and creator ~= "?" and creator ~= cur then
+        closeRolledOver()
+      end
     end
     if not CheckInstanceTransition() then ns.CheckZoneTransition() end
   elseif event == "ZONE_CHANGED_NEW_AREA" or event == "ZONE_CHANGED"
@@ -2824,7 +3257,7 @@ function ns.Diag()
       end
     end
   end
-  if n == 0 then ns.Print("  no items yet — loot something first, then /haul diag") end
+  if n == 0 then ns.Print("  no items yet, loot something first, then /haul diag") end
 end
 
 

@@ -22,14 +22,31 @@ if not Data or not Data.Provide then return end
 
 -- per-token type, sourced from ns.OutputTokens() (each entry { name, type }) so the feed stays in
 -- lock-step with Haul's vocabulary + classification (no duplicated name list / guessing here).
-local tokenTypes = {}
+-- tokenColors[name] = the token's DEFAULT color hex (text tokens only). Handed to consumers so a
+-- {haul.<token>} shows its category color automatically in a Gadgets bar, while {haul.<token>:color}
+-- still overrides it (GECData passes it as GECTemplate's 3rd resolver return; explicit :color wins).
+local tokenTypes, tokenColors = {}, {}
 for _, t in ipairs((ns.OutputTokens and ns.OutputTokens()) or {}) do
   tokenTypes[t.name] = t.type or "raw"
+  if t.color then tokenColors[t.name] = t.color end
 end
 
--- Cached field table: BuildFields() builds the WHOLE token table, so we compute it ONCE per second
--- (below) and have GetToken read from the cache — not a fresh BuildFields() per token per render.
-local cache = {}
+-- Field cache with REUSE + demand-gating. BuildFields() is expensive (full log replay + sort + alloc), so:
+--   1) if Window just built this tick (it stamps ns._fieldsSnap, 1/sec while shown), REUSE that — no
+--      second pass; and
+--   2) we only build ourselves when a consumer is actively reading (a GetToken call in the last few
+--      seconds — e.g. a Gadgets bar) and Window isn't already doing it. When the window is closed AND
+--      nothing reads the feed, no pass runs at all (the hidden-window skip the feed used to bypass).
+local cache, cacheAt, lastRead = {}, 0, 0
+local function nowT() return (GetTime and GetTime()) or 0 end
+local function ensureFresh()
+  local now = nowT()
+  local snap = ns._fieldsSnap
+  if snap and snap.fields and (now - (snap.t or 0)) < 1.2 then cache, cacheAt = snap.fields, now; return end
+  if (now - cacheAt) < 1 then return end                 -- our own cache still fresh (<1s)
+  cache = (ns.BuildFields and ns.BuildFields()) or cache
+  cacheAt = now
+end
 
 -- belt-and-suspenders: for a "text"-typed token, strip any stray color escapes from the cached value
 -- so it's reliably colorable even if a value sneaks in baked color. Keep textures (|T..|t) and links
@@ -43,7 +60,9 @@ local feed = Data.Provide("Haul", {
   text = "Haul",
   icon = "Interface\\Icons\\inv_misc_coin_01",
   tokenTypes = tokenTypes,
+  tokenColors = tokenColors,   -- overridable default colors for the consumer (see above)
   GetToken = function(name)
+    lastRead = nowT(); ensureFresh()   -- a consumer is reading → keep fresh (reuses Window's build if any)
     local v = cache[name]
     if v == nil then return nil end
     if tokenTypes[name] == "text" then return stripColor(v) end   -- ensure plain → colorable
@@ -60,6 +79,13 @@ local feed = Data.Provide("Haul", {
     tt:AddLine("Session: " .. (cache.haul or "-"))
     tt:AddLine("Per hour: " .. (cache.perhour or "-"))
     tt:AddLine("Items: " .. (cache["items.count"] or "0"))
+    -- WoW Token history block (price/trend, today + all-time stats, last N reads) — only once the lib
+    -- has a price. The lib owns the whole section; we just add a spacer and hand it the tooltip.
+    local wt = ns.WowToken
+    if wt and wt.BuildTooltip and wt.GetPrice and wt.GetPrice() then
+      tt:AddLine(" ")
+      wt.BuildTooltip(tt)
+    end
   end,
 })
 
@@ -68,9 +94,14 @@ local feed = Data.Provide("Haul", {
 -- Live text = session haul + per-hour (a compact "what am I making" line for any LDB display).
 if feed and feed.object and C_Timer then
   C_Timer.NewTicker(1, function()
-    cache = (ns.BuildFields and ns.BuildFields()) or cache
-    local haul = cache.haul or "-"
-    local per  = cache.perhour or "-"
-    feed.object.text = "Haul " .. haul .. "   " .. per .. "/hr"
+    -- Only refresh the LDB line when something actually consumes the feed: a token read in the last ~5s
+    -- (a Gadgets bar — self-sustaining, since setting .text drives its re-render → next GetToken), or the
+    -- window is up (its snapshot is fresh). Nothing reading + window closed → skip the whole pass.
+    local now = nowT()
+    local snap = ns._fieldsSnap
+    local windowUp = snap and (now - (snap.t or 0)) < 1.2
+    if (now - lastRead) > 5 and not windowUp then return end
+    ensureFresh()
+    feed.object.text = "Haul " .. (cache.haul or "-") .. "   " .. (cache.perhour or "-") .. "/hr"
   end)
 end

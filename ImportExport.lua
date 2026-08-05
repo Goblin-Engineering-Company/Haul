@@ -145,7 +145,7 @@ end
 function ns.ImportSettings(text)
   local ok, data = pcall(decode, text)
   if not ok or type(data) ~= "table" then
-    ns.Print("|cffff6060import failed — not valid JSON|r"); return false
+    ns.Print("|cffff6060import failed: not valid JSON|r"); return false
   end
   for _, k in ipairs(SETTINGS_KEYS) do
     if data[k] ~= nil then HaulDB[k] = data[k] end
@@ -175,7 +175,7 @@ function ns.ShowPorter()
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
     local title = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    title:SetPoint("TOP", 0, -10); title:SetText("Haul — Settings (JSON)")
+    title:SetPoint("TOP", 0, -10); title:SetText("Haul Settings (JSON)")
     Theme.Font(title, "text")
     local porterCloseBtn = Theme.CloseButton(frame, function() frame:Hide() end)
     porterCloseBtn:SetPoint("TOPRIGHT", -6, -6)

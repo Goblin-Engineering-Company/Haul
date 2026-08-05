@@ -1,0 +1,40 @@
+name: Release
+
+# Publishes the addon to the community platforms when you push a version tag.
+# A platform is uploaded to ONLY if BOTH its project ID (## X-*-ID in the .toc)
+# AND its API-token repo secret are present — so this one file safely covers
+# WoWInterface now, and CurseForge / Wago the moment you add their IDs + tokens.
+#
+# Release type is taken from the TAG NAME: a tag containing "alpha" -> alpha,
+# "beta" -> beta, otherwise -> release. Tag must match the ## Version you ship
+# (this repo keeps a literal numeric CalVer in the .toc; do NOT use @project-version@).
+#
+# Secrets (Settings -> Secrets and variables -> Actions). LEFT = the GitHub secret name;
+# it is mapped to the packager's expected env var (RIGHT) in the `env:` block below.
+#   WOWI_API_KEY   (org)  -> WOWI_API_TOKEN   WoWInterface (File Control Panel -> API Tokens)
+#   CF_API_KEY     (org)  -> CF_API_KEY       CurseForge   (authors.curseforge.com -> API Tokens)
+#   WAGO_API_TOKEN        -> WAGO_API_TOKEN   Wago Addons  (addons.wago.io -> Account -> API Keys)  [add later]
+#
+# NOTE: this packager does NOT create the GitHub Release (no GITHUB_OAUTH). The
+# GitHub release + goblineng.co changelog are owned by scripts/release-public.sh,
+# which pushes this tag AND runs `gh release create` with curated notes. Giving the
+# packager a GitHub token too would make both race to create the same release.
+
+on:
+  push:
+    tags:
+      - '**'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history so the auto-changelog is populated
+      - name: Package and release
+        uses: BigWigsMods/packager@v2
+        env:
+          WOWI_API_TOKEN: ${{ secrets.WOWI_API_KEY }}
+          CF_API_KEY:     ${{ secrets.CF_API_KEY }}
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}

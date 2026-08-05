@@ -1,3 +1,11 @@
+Licensing for the libraries embedded under this Libs/ directory.
+
+Two different things live here, and they are NOT under the same license.
+
+
+1. Goblin Engineering Company libraries
+   Every directory named GEC*. These are ours.
+
 MIT License
 
 Copyright (c) 2026 Goblin Engineering Company
@@ -19,3 +27,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+2. Third-party libraries
+   Embedded verbatim, community-authored, and NOT owned by Goblin Engineering
+   Company. No GEC copyright is claimed over any of them. Each one stays under
+   its own upstream license and is redistributed under those terms.
+
+   LibStub/
+     Placed in the Public Domain by its authors.
+     Credits: Kaelten, Cladhaire, ckknight, Mikk, Ammo, Nevcairiel, joshborke
+     http://www.wowace.com/addons/libstub/
+
+   CallbackHandler-1.0/
+     Part of the Ace3 project, copyright its authors. See the Ace3 project for
+     the authoritative license text.
+     https://www.wowace.com/projects/ace3
+
+   LibDataBroker-1.1/
+     Copyright (c) Tekkub. MIT License.
+     https://github.com/tekkub/libdatabroker-1-1

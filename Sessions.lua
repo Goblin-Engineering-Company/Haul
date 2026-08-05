@@ -188,10 +188,10 @@ local function Refresh()
       r.head:SetPoint("TOPLEFT", 20, 0); r.head:SetPoint("RIGHT", r, "RIGHT", -176, 0); r.head:SetHeight(22)
       r.head:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
       r.head:SetScript("OnEnter", function(self)   -- explain the disk indicator (r._onDisk set per refresh)
-        GameTooltip:SetOwner(self, "ANCHOR_TOPLEFT")
+        GameTooltip:SetOwner(self, "ANCHOR_CURSOR")   -- cursor-relative, consistent with the settings tips
         GameTooltip:SetText(r._onDisk and "On disk" or "In memory only")
         GameTooltip:AddLine(r._onDisk
-          and "Written to SavedVariables — safe across a crash."
+          and "Written to SavedVariables, safe across a crash."
           or "Not yet written. Reload or log out to flush it to disk (Save reloads by default).",
           0.9, 0.9, 0.9, true)
         GameTooltip:Show()
@@ -439,7 +439,9 @@ function ns.EmbedSessions(host)
   if C_Timer and C_Timer.After then C_Timer.After(0, fitChild) end
   frame.empty = frame:CreateFontString(nil, "ARTWORK", "GameFontDisable")
   frame.empty:SetPoint("CENTER", 0, 0)
-  frame.empty:SetText("No saved sessions yet — hit Save during a run.")
+  -- "New" is the button that BANKS (ns.Reset -> BankSession). "Save" is reload-to-sync and creates nothing,
+  -- so telling players to hit Save here sent them to the one button that can't produce a saved session.
+  frame.empty:SetText("No saved sessions yet. Press New to bank the run you're on.")
   Theme.Font(frame.empty, "textMuted")
   rows = nil   -- rows pool is parented to frame.child; rebuild for this host
   Refresh()

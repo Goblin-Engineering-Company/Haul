@@ -2,7 +2,7 @@
 -- Two layers, decoupled: a semantic PALETTE (the only place raw colors live) and structure-only
 -- FIXTURES that read colors from the palette by name. Drop in a different palette -> same layouts,
 -- new colors.
-local MAJOR, MINOR = "GECTheme-1.0", 15
+local MAJOR, MINOR = "GECTheme-1.0", 18
 local Theme = LibStub:NewLibrary(MAJOR, MINOR)
 if not Theme then return end   -- a newer copy is already loaded
 
@@ -123,6 +123,20 @@ Theme.NAMED_COLORS = {
   white = "ffffff", red = "ff6060", green = "1eff00", blue = "66ccff",
   gold = "ffd100", yellow = "ffd100", purple = "a335ee", gray = "808080",
   grey = "808080", orange = "eda55f", teal = "45c4a0",
+  pink = "e874c4", lilac = "c7a2ff",
+  -- SEMANTIC category colors — the ONE source every GEC addon shares (Haul log/tokens, Gadgets,
+  -- SBF). Reference by name (Theme.ColorToHex("rep") / {token:rep}) so a hex change here propagates
+  -- everywhere at once. xp=green, rep=pink, currency=blue, kill=red, mail/coin=gold, vendor=orange,
+  -- skill=lilac (kept visually distinct: rep pink vs currency blue vs skill lilac).
+  xp = "1eff00", rep = "e874c4", currency = "66ccff", kill = "ff6060",
+  mail = "ffd100", coin = "ffd100", vendor = "ff9933", skill = "c7a2ff",
+  -- Log-KIND colors — seeded from SBF's per-outcome scheme so SBF's + Haul's shared log viewer
+  -- (GECStoreView) reads every kind's color from ONE place; retune any of these and both logs follow.
+  caught = "33ff33", expired = "aaaaaa", nothing = "dd8faf", missed = "ffaa44", interrupt = "ff6060",
+  castfail = "ff8844", action = "7fb0e6", buff = "ffcf40", gathered = "c0d860",
+  -- session-lifecycle markers (shared identically by both addons today)
+  start = "45c4a0", stop = "ff6060", pause = "ffaa44", resume = "45c4a0",
+  fold = "c080ff", include = "808080", exclude = "a0a0a0",
 }
 function Theme.ColorToHex(input)
   if type(input) ~= "string" then return nil end

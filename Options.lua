@@ -70,7 +70,9 @@ end
 
 local function AttachTip(frame, title, body)
   frame:HookScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    -- ANCHOR_CURSOR: the tip appears at the pointer, so it lands consistently on whatever you're hovering
+    -- instead of jumping to a different screen spot per row (ANCHOR_RIGHT) and flipping near the edge.
+    GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
     GameTooltip:SetText(title, 1, 1, 1)
     if body then GameTooltip:AddLine(body, 0.9, 0.9, 0.9, true) end
     GameTooltip:Show()
@@ -78,36 +80,73 @@ local function AttachTip(frame, title, body)
   frame:HookScript("OnLeave", GameTooltip_Hide)
 end
 
+-- an accent "Key: description" tooltip line — colored key + plain body, one option per line
+local function tline(k, d) return Theme.Accent(k) .. ":  " .. d end
+
 local PRICE_HELP = "Where item values come from:\n"
   .. Theme.Accent("vendor") .. " = sell-to-vendor price (always available)\n"
   .. Theme.Accent("auctionator") .. " = Auctionator's last-scanned auction price\n"
   .. Theme.Accent("tsm") .. " = TradeSkillMaster (uses the price string below)\n"
   .. "Auction sources need the addon installed AND a recent AH scan."
 
+-- The complete token vocabulary, grouped by category. Shared by BOTH the Header layout tip and the
+-- Detail layout tip so the two can never drift. Authoritative source: Window.lua's TOKEN_DEFAULT_COLOR
+-- + MONEY_TOKENS + ns.OutputTokens(). Great Vault tokens are intentionally omitted (feature removed).
+local TOKEN_REFERENCE =
+    Theme.Accent("Loot & gold") .. "\n"
+  .. "{haul}=total  {total}  {loot}  {cash}  {gross}  {perhour}  {gross.perhour}\n"
+  .. "{items.count}  {items.value}  {items.notable}  {items.notable.label}\n"
+  .. "{items.last}  {items.last.name}  {items.last.count}  {items.last.value}\n"
+  .. "{flushed}\n\n"
+  .. Theme.Accent("Experience") .. "\n"
+  .. "{xp}  {xp.perhour}\n"
+  .. "{xp.top}  {xp.top.name}  {xp.top.count}  {xp.top.amount}\n"
+  .. "{xp.top.category}  {xp.top.category.name}  {xp.top.category.amount}\n"
+  .. "{xp.last}  {xp.last.name}  {xp.last.count}  {xp.last.amount}  {xp.last.source}\n\n"
+  .. Theme.Accent("Currency") .. "\n"
+  .. "{currency}  {currency.name}  {currency.perhour}\n"
+  .. "{currency.top}  {currency.detail}\n"
+  .. "{currency.last}  {currency.last.name}  {currency.last.count}  {currency.last.amount}\n\n"
+  .. Theme.Accent("Kills") .. "\n"
+  .. "{kills}  {kills.perhour}\n"
+  .. "{kills.top}  {kills.top.name}  {kills.top.count}\n"
+  .. "{kills.last}  {kills.last.name}  {kills.last.count}\n\n"
+  .. Theme.Accent("Reputation") .. "\n"
+  .. "{rep}  {rep.amount}  {rep.faction}  {rep.perhour}\n"
+  .. "{rep.top}  {rep.detail}\n"
+  .. "{rep.last}  {rep.last.name}  {rep.last.count}  {rep.last.amount}\n\n"
+  .. Theme.Accent("Skills") .. "\n"
+  .. "{skill}  {skill.perhour}\n"
+  .. "{skill.top}  {skill.top.name}  {skill.top.count}  {skill.top.amount}\n"
+  .. "{skill.last}  {skill.last.name}  {skill.last.count}  {skill.last.amount}  {skill.last.level}\n\n"
+  .. Theme.Accent("Mail") .. "\n"
+  .. "{mail}  {mail.gold}  {mail.perhour}  {gold.perhour}\n"
+  .. "{mail.last}  {mail.last.value}  {mail.last.gold}  {mail.last.item}\n\n"
+  .. Theme.Accent("Anything last") .. "  (the last thing of ANY kind)\n"
+  .. "{last}  {last.kind}  {last.name}  {last.count}  {last.amount}  {last.source}  {last.value}  {last.perhour}\n\n"
+  .. Theme.Accent("Time") .. "\n"
+  .. "{time}  {time.current}  {time.current.ampm}  {time.ig}  {time.timer}\n\n"
+  .. Theme.Accent("Zone") .. "\n"
+  .. "{zone}  {zone.full}  {zone.region}  {zone.zone}  {zone.sub}\n\n"
+  .. Theme.Accent("WoW Token") .. "\n"
+  .. "{token}  {token.percent}  {token.price}  {token.trend}  {token.value}  {source}\n\n"
+  .. Theme.Accent("Money, color, new line") .. "\n"
+  .. "Money tokens take .short (top unit, 40s) or .full (g s c); bare = short.\n"
+  .. "{token:color}: color is a name (blue, green, gold, white, red, purple,\n"
+  .. "orange) or a hex like 66ccff. Money tokens keep their own g/s/c colors.\n"
+  .. "{br} jumps to the next line; the bar grows to fit. (also {lb}, {lw}, {linewrap})"
+
 local HEADER_HELP =
     "Type any text for the top bar and drop in {tokens}.\n\n"
-  .. Theme.Accent("Tokens") .. "\n"
-  .. "{time}  {time.current}  {time.current.ampm}  {time.ig}\n"
-  .. "{haul}=total  {total}  {loot}  {cash}  {gross}  {perhour}  {gross.perhour}\n"
-  .. "{items.count}  {items.value}  {items.notable}\n"
-  .. "{items.last}  {items.last.name}  {items.last.count}  {items.last.value}\n"
-  .. "{token.percent}  {token.price}  {token.trend}  {zone}  {source}  {flushed}\n"
-  .. "any money token takes .short (top unit, 40s) or .full (g s c); bare = short\n"
-  .. "(items.last = previous drop, name shown in its item-quality\n"
-  .. " color; time.ig = since login)\n\n"
-  .. Theme.Accent("Great Vault") .. "\n"
-  .. "{vault.delve.slots}  {vault.delve.tier}  {vault.delve.ilvl}\n"
-  .. "(also .done .next .s1 .s2 .s3; tracks: raid, dungeon, delve)\n"
-  .. "{vault.delve}  = summary,  {vault.ready} = claim alert\n\n"
-  .. Theme.Accent("Color a token") .. "\n"
-  .. "{token:color}  —  color is a name (blue, green,\n"
-  .. "gold, white, red, purple, orange) or hex like 66ccff.\n"
-  .. "Money tokens keep their own g/s/c colors.\n\n"
-  .. Theme.Accent("New line") .. "\n"
-  .. "{br}  jumps to the next line; the bar grows to fit.\n"
-  .. "(also {lb}, {lw}, {linewrap})\n\n"
+  .. TOKEN_REFERENCE .. "\n\n"
   .. Theme.Accent("Example") .. "\n"
   .. "{time}{br}Haul {haul}   {token:blue}"
+
+-- Detail layout tip: the body/stats block under the header runs through the SAME {token} engine, so it
+-- shares the full token reference (its own one-line intro, then the shared block).
+local DETAIL_HELP =
+    "The body/stats area under the header, rendered through the same {token} engine as the header bar.\n\n"
+  .. TOKEN_REFERENCE
 
 -- ----- keybind capture (assign a key combo to a named Haul binding) -----
 -- The capture cell + the game-style "already bound, reassign?" conflict prompt come from the shared GECBind
@@ -180,7 +219,7 @@ local function Build()
     return raw, child
   end
   local pData, pKeybinds, pLog = MakePage(), MakePage(), MakePage()
-  local pDebug   -- dev-only Debug tab; its page frame is created in the dev block below, so no dead frame ships
+  local pDebug   -- dev-only Dev tab; its page frame is created in the dev block below, so no dead frame ships
   local pGeneral = MakePage()   -- non-scroll: its content fits the fixed window, so no scrollbar reserve eats width
   local rawHeader, pHeader = MakeScrollPage(594)   -- +54 for the taller header-layout box
   local rawAbout, pAbout = MakeScrollPage(460)     -- scrollable About page (banner can push content below the fold)
@@ -242,7 +281,7 @@ local function Build()
     -- the "does it all" one-liner: what Haul tracks and shows for you.
     local desc = pAbout:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     desc:SetPoint("TOP", tag, "BOTTOM", 0, -8); desc:SetWidth(440); desc:SetJustifyH("CENTER")
-    desc:SetText("Tracks everything you pick up — loot, coin, reputation, currency, kills, and XP — values it "
+    desc:SetText("Tracks everything you pick up (loot, coin, reputation, currency, kills, and XP), values it "
       .. "against vendor or auction prices, and shows your gold-per-hour in a movable bar, with saved sessions "
       .. "you can merge and compare.")
     Theme.Font(desc, "textDim")
@@ -323,7 +362,8 @@ local function Build()
   -- AttachTip as a check-leaf render fn (title white + body gray, matching AttachTip exactly)
   local function tipFn(title, body)
     return function(owner)
-      GameTooltip:SetOwner(owner, "ANCHOR_RIGHT"); GameTooltip:SetText(title, 1, 1, 1)
+      GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")   -- follow the pointer (see AttachTip note); no row-to-row jumping
+      GameTooltip:SetText(title, 1, 1, 1)
       if body then GameTooltip:AddLine(body, 0.9, 0.9, 0.9, true) end
       GameTooltip:Show()
     end
@@ -407,15 +447,17 @@ local function Build()
   panel.mailDD = MakeChoiceDD(pGeneral, 0, 0, 150, MODE_OPTS, function() return HaulDB.mailMode end,
     function(v) HaulDB.mailMode = v end)
 
-  -- inline flush interval editbox (sits on the "Auto reload every:" check row) + map-level dropdown
+  -- inline flush interval editbox (sits on the "Remind me to sync every:" check row) + map-level dropdown
   panel.flushBox = CreateFrame("EditBox", nil, pGeneral, "InputBoxTemplate")
   panel.flushBox:SetSize(56, 20); panel.flushBox:SetAutoFocus(false); Theme.EditBox(panel.flushBox)
   panel.flushBox:SetScript("OnEnterPressed", function(self)
     HaulDB.flushSeconds = ns.Duration.ParseSeconds(self:GetText(), HaulDB.flushSeconds)
     self:SetText(ns.Duration.Format(HaulDB.flushSeconds)); self:ClearFocus(); ns.StartFlush()
   end)
-  AttachTip(panel.flushBox, "Auto-reload interval",
-    "How often to auto-reload. Enter a number with a unit: " .. Theme.Accent("10s") .. " (seconds), "
+  -- Same correction as the checkbox beside it: nothing here auto-reloads (a timed reload is taint-blocked),
+  -- it only sets how often you get nudged. The checkbox was relabeled and this sibling tooltip was missed.
+  AttachTip(panel.flushBox, "Sync reminder interval",
+    "How often to remind you. Enter a number with a unit: " .. Theme.Accent("10s") .. " (seconds), "
     .. Theme.Accent("10m") .. " (minutes), " .. Theme.Accent("1h") .. " (hours).")
   local MAP_LEVEL_OPTS = {
     { label = "Region / continent", v = "region" }, { label = "Zone", v = "zone" }, { label = "Sub-zone", v = "subzone" },
@@ -423,7 +465,7 @@ local function Build()
   panel.mapLevelDD = MakeChoiceDD(pGeneral, 0, 0, 150, MAP_LEVEL_OPTS,
     function() return HaulDB.newSessionMapLevel or "region" end, function(v) HaulDB.newSessionMapLevel = v end)
   local mlTip = "How coarse a move counts: Region (continent only), Zone, or Sub-zone (every named area). "
-    .. "A finer level ALSO fires on coarser moves — pick Zone and crossing a region counts too. Applies "
+    .. "A finer level ALSO fires on coarser moves (pick Zone and crossing a region counts too). Applies "
     .. "whether you Ask or switch automatically."
   AttachTip(panel.mapLevelDD, "Map level", mlTip)
 
@@ -442,8 +484,9 @@ local function Build()
       chk("Reload before new session", function() return HaulDB.reloadBeforeNewSession end,
         function(v) HaulDB.reloadBeforeNewSession = v end, "Reload before new session",
         "Reload the UI right before a new session starts (the New button, and automatic new sessions on a map "
-        .. "change), flushing your data to disk at each session boundary. Optional; off by default. "
-        .. "(Your run is always banked to Saved Sessions on New regardless — this only controls the reload.)", "cbReset"),
+        .. "change), flushing your data to disk at each session boundary. (Your run is always banked to Saved "
+        .. "Sessions on New regardless; this only controls the reload.)\n"
+        .. tline("Default", "off"), "cbReset"),
       chk("New session on instances  (set aside + resume)",
         function() return HaulDB.newSessionTriggers and HaulDB.newSessionTriggers.instance end,
         function(v) HaulDB.newSessionTriggers = HaulDB.newSessionTriggers or {}; HaulDB.newSessionTriggers.instance = v end,
@@ -453,7 +496,11 @@ local function Build()
         function() return HaulDB.newSessionTriggers and HaulDB.newSessionTriggers.scenario end,
         function(v) HaulDB.newSessionTriggers = HaulDB.newSessionTriggers or {}; HaulDB.newSessionTriggers.scenario = v end,
         "Treat scenarios as instances",
-        "Scenario-system content (world quests, open-world events, delves) runs on the SAME system dungeons do, so WoW flags it as an instance. OFF by default: 9/10 a 'scenario' is an open-world area you fly THROUGH on a farm run — you don't want it setting your session aside. Turn ON only to track scenarios/delves as their own run.", "cbScenario", 1),
+        "Scenario-system content (world quests, open-world events, delves) runs on the SAME system dungeons do, "
+        .. "so WoW flags it as an instance.\n"
+        .. tline("Default", "off") .. "\n"
+        .. "9/10 a 'scenario' is an open-world area you fly THROUGH on a farm run, and you don't want it setting "
+        .. "your session aside. Turn ON only to track scenarios/delves as their own run.", "cbScenario", 1),
       chk("New session on map change",
         function() return HaulDB.newSessionTriggers and HaulDB.newSessionTriggers.map end,
         function(v) HaulDB.newSessionTriggers = HaulDB.newSessionTriggers or {}; HaulDB.newSessionTriggers.map = v end,
@@ -461,70 +508,102 @@ local function Build()
         "Start a fresh run when your location changes. The two rows below set HOW (ask first, or switch automatically) and at WHAT level a move counts.", "cbMap"),
       chk("Ask first  (off = switch automatically)", function() return HaulDB.newSessionPrompt end,
         function(v) HaulDB.newSessionPrompt = v end, "Ask first",
-        "On a qualifying map change, ASK before starting the new session (New session / Keep current). Off = it just switches automatically.", "cbPrompt", 1),
+        "On a qualifying map change, ASK before starting the new session (New session / Keep current).\n"
+        .. tline("Off", "it just switches automatically."), "cbPrompt", 1),
       { dir = "row", align = "center", gap = 8, pad = { l = 16 },
         { note = { text = "at level:", color = "text", onBuild = labelTip("Map level", mlTip) } },
         { frame = panel.mapLevelDD } },
       { dir = "row", align = "center", gap = 8,
-        chk("Auto reload every:", function() return HaulDB.flushEnabled end,
-          function(v) HaulDB.flushEnabled = v; ns.StartFlush() end, "Auto reload",
-          "Reload the UI automatically on the interval to the right, so your session data is written to disk regularly. Off = data is written only when you Save / Flush.", "cbFlush"),
+        -- NOT "Auto reload": a timed reload is taint-blocked and can never run itself (see Flush.lua). All
+        -- this does is remind you when a sync is due; YOU press Save to actually do it. The old label
+        -- promised an automatic reload that was never going to happen.
+        chk("Remind me to sync every:", function() return HaulDB.flushEnabled end,
+          function(v) HaulDB.flushEnabled = v; ns.StartFlush() end, "Sync reminder",
+          "Nudge you on the interval to the right when your session data is due to be written to disk. The game only lets a reload run from YOUR click, so this reminds you and you press Save. Off = no nudge; data is written when you Save / Flush.", "cbFlush"),
         { frame = panel.flushBox } },
     },
     { section = "Looting",
       chk("Ultra fast loot  (grab everything instantly, no loot window)", function() return HaulDB.fastLoot end,
         function(v) HaulDB.fastLoot = v and true or false; if ns.ApplyFastLoot then ns.ApplyFastLoot() end end,
         "Ultra fast loot",
-        "Replaces the game's built-in auto-loot with a fast, silent looter: everything is grabbed off a corpse/node "
-        .. "with no loot window popping up, and it keeps up even at low framerate (the built-in auto-loot can drop "
-        .. "items when your FPS dips). The normal loot window still appears on its own when it needs you \226\128\148 "
-        .. "a locked slot, an item above your group's loot-quality threshold, a bind-on-pickup confirm, or full bags "
-        .. "\226\128\148 so nothing is ever silently lost.", "cbFastLoot"),
-      -- (Full kill tracking moved to the dev-only Debug tab.)
+        "Replaces the game's built-in auto-loot with a fast, silent looter: everything is grabbed off a "
+        .. "corpse/node with no loot window popping up, and it keeps up even at low framerate (the built-in "
+        .. "auto-loot can drop items when your FPS dips).\n"
+        .. "The normal loot window still appears on its own when it needs you (a locked slot, an item above "
+        .. "your group's loot-quality threshold, a bind-on-pickup confirm, or full bags), so nothing is ever "
+        .. "silently lost.", "cbFastLoot"),
+      -- (Full kill tracking moved to the dev-only Dev tab.)
     },
   }
 
   local rightCol = { basis = 246, minWidth = 246,   -- label 78 + gap 8 + dropdown 150 + section indent 10
     { section = "Item display",
       ddRow("Loot view:", panel.viewDD, RIGHT_LBL_W, "Loot view",
-        "Loot category — Collection = each item once with a running count (x45). List = every loot event on its own line, newest first."),
+        tline("Collection", "each item once with a running count (x45).") .. "\n"
+        .. tline("List", "every loot event on its own line, newest first.")),
       ddRow("Rep view:", panel.repViewDD, RIGHT_LBL_W, "Reputation view",
-        "Reputation category — Collection = per-faction session totals. List = the chronological +rep stream, newest first (see which sources pay)."),
+        tline("Collection", "per-faction session totals.") .. "\n"
+        .. tline("List", "the chronological +rep stream, newest first (see which sources pay).")),
       ddRow("Curr view:", panel.currencyViewDD, RIGHT_LBL_W, "Currency view",
-        "Currency category — Collection = per-currency session totals (gains only). List = the chronological +currency stream, newest first. Spending is logged but not shown here."),
+        tline("Collection", "per-currency session totals (gains only).") .. "\n"
+        .. tline("List", "the chronological +currency stream, newest first.") .. "\n"
+        .. "Spending is logged but not shown here."),
       ddRow("Skills view:", panel.profViewDD, RIGHT_LBL_W, "Skills view",
-        "Skills category — Collection = per-profession skill-ups gained this session. List = the chronological skill-up stream, newest first."),
+        tline("Collection", "per-profession skill-ups gained this session.") .. "\n"
+        .. tline("List", "the chronological skill-up stream, newest first.")),
       ddRow("XP view:", panel.xpViewDD, RIGHT_LBL_W, "XP view",
-        "XP category — Collection = total experience this session + a per-zone discovery breakdown. List = the chronological zone-discovery stream, newest first."),
+        tline("Collection", "total experience this session + a per-zone discovery breakdown.") .. "\n"
+        .. tline("List", "the chronological zone-discovery stream, newest first.")),
       ddRow("Kills view:", panel.killViewDD, RIGHT_LBL_W, "Kills view",
-        "Kills category — Collection = per-mob kill counts this session. List = the chronological kill stream, newest first."),
+        tline("Collection", "per-mob kill counts this session.") .. "\n"
+        .. tline("List", "the chronological kill stream, newest first.")),
       ddRow("Sort:", panel.sortDD, RIGHT_LBL_W, "Sort (Collection)",
-        "How the Collection view orders items: by Value (highest first), Name (alphabetical), Count (most copies first), or Time (order first looted). List view is always newest-first."),
+        "How the Collection view orders items:\n"
+        .. tline("Value", "highest first.") .. "\n"
+        .. tline("Name", "alphabetical.") .. "\n"
+        .. tline("Count", "most copies first.") .. "\n"
+        .. tline("Time", "order first looted.") .. "\n"
+        .. "List view is always newest-first."),
       ddRow("Value:", panel.valueFmtDD, RIGHT_LBL_W, "Value format",
-        "How EVERY money value shows across Haul: Short = just the largest unit (3g — compact, rounds off silver/copper), Long = the full amount (3g 47s 21c). Applies to the window, buckets, and header tokens."),
+        tline("Short", "just the largest unit (3g, compact, rounds off silver/copper).") .. "\n"
+        .. tline("Long", "the full amount (3g 47s 21c).") .. "\n"
+        .. "Applies to the window, buckets, and header tokens."),
     },
     { section = "Grouping",
       ddRow("Soulbound:", panel.boundDD, RIGHT_LBL_W, "Bind-on-pickup items",
-        "Soulbound (bind-on-pickup) loot can't be auctioned, so it's valued at vendor "
-        .. "price. In Collection view it's a collapsible \"Soulbound\" group: Expanded (open), "
-        .. "Collapsed (closed, click to expand), or Hidden. Sets the group's default — it remembers your clicks."),
+        "Soulbound (bind-on-pickup) loot can't be auctioned, so it's valued at vendor price. "
+        .. "In Collection view it's a collapsible \"Soulbound\" group.\n"
+        .. tline("Expanded", "open") .. "\n"
+        .. tline("Collapsed", "closed, click to expand") .. "\n"
+        .. tline("Hidden", "dropped from the list") .. "\n"
+        .. "Sets the group's default. It remembers your clicks."),
       ddRow("Grays:", panel.graysDD, RIGHT_LBL_W, "Gray items",
-        "Gray (Poor) loot, always valued at vendor price. In Collection view it's a "
-        .. "collapsible \"Vendor trash\" group: Expanded (open), Collapsed (closed, click to expand), "
-        .. "or Hidden (dropped from the list and totals). Sets the group's default — it remembers your clicks."),
+        "Gray (Poor) loot, always valued at vendor price. In Collection view it's a collapsible "
+        .. "\"Vendor trash\" group.\n"
+        .. tline("Expanded", "open") .. "\n"
+        .. tline("Collapsed", "closed, click to expand") .. "\n"
+        .. tline("Hidden", "dropped from the list and totals") .. "\n"
+        .. "Sets the group's default. It remembers your clicks."),
       ddRow("Excluded:", panel.excludedDD, RIGHT_LBL_W, "Excluded items",
-        "Items you've excluded from your haul (click an item to toggle). They never count "
-        .. "toward your total either way. In Collection view it's a collapsible \"Excluded\" group: "
-        .. "Expanded (open), Collapsed (closed, click to expand), or Hidden (dropped from the list and the "
-        .. "gross total too). Sets the group's default — it remembers your clicks."),
+        "Items you've excluded from your haul (click an item to toggle). They never count toward "
+        .. "your total either way. In Collection view it's a collapsible \"Excluded\" group.\n"
+        .. tline("Expanded", "open") .. "\n"
+        .. tline("Collapsed", "closed, click to expand") .. "\n"
+        .. tline("Hidden", "dropped from the list and the gross total too") .. "\n"
+        .. "Sets the group's default. It remembers your clicks."),
       ddRow("Mailbox:", panel.mailDD, RIGHT_LBL_W, "Mailbox items",
-        "Items pulled from the mailbox aren't farm loot, so they never count toward your haul "
-        .. "total. In Collection view they're a collapsible \"Mailbox\" group (with mail gold nested inside): "
-        .. "Expanded (open), Collapsed (closed, click to expand), or Hidden (dropped from the list). Click any "
-        .. "mail item to include it in your haul one-off. Sets the group's default — it remembers your clicks."),
+        "Items pulled from the mailbox aren't farm loot, so they never count toward your haul total. "
+        .. "In Collection view they're a collapsible \"Mailbox\" group (with mail gold nested inside). "
+        .. "Click any mail item to include it in your haul one-off.\n"
+        .. tline("Expanded", "open") .. "\n"
+        .. tline("Collapsed", "closed, click to expand") .. "\n"
+        .. tline("Hidden", "dropped from the list") .. "\n"
+        .. "Sets the group's default. It remembers your clicks."),
     },
   }
 
+  -- (The theme picker lives on the Dev tab now — it's dev-only, so it belongs there, not on General.
+  --  See the Dev page build below.)
 
   local genRoot, refs = Theme.Layout(pGeneral,
     { dir = "row", align = "start", gap = 12, pad = { t = 6, r = 8, b = 8, l = 8 }, leftCol, rightCol },
@@ -537,7 +616,7 @@ local function Build()
 
   panel.cbReset = refs.cbReset   -- "Reload before new session" toggle
   panel.cbInstance, panel.cbScenario, panel.cbMap, panel.cbPrompt = refs.cbInstance, refs.cbScenario, refs.cbMap, refs.cbPrompt
-  panel.cbFlush, panel.cbFastLoot = refs.cbFlush, refs.cbFastLoot   -- cbCLK (kill tracking) moved to the Debug tab
+  panel.cbFlush, panel.cbFastLoot = refs.cbFlush, refs.cbFastLoot   -- cbCLK (kill tracking) moved to the Dev tab
   -- ===================== HEADER: template + display styling — box tree =====================
   local TEMPLATE_BOX_H = 108
   local function MakeFixedTemplateEditor(parent, height, onChanged)
@@ -644,8 +723,7 @@ local function Build()
     { note = { text = sampleText, color = "textMuted" } },
     -- Detail layout: title + right-pinned Show-in-window check
     { dir = "row", justify = "between", align = "center",
-      { note = { text = Theme.Accent("Detail layout"), color = "text", onBuild = hdrTitle("Detail layout",
-          "The body/stats area under the header, rendered through the same {token} engine. Same tokens as the header — e.g. {haul.full}, {zone}, {items.notable.label}.") } },
+      { note = { text = Theme.Accent("Detail layout"), color = "text", onBuild = hdrTitle("Detail layout", DETAIL_HELP) } },
       { id = "showDetail", check = { label = "Show in window",
           get = function() return HaulDB.window and HaulDB.window.showDetail ~= false end,
           set = function(v) HaulDB.window.showDetail = v and true or false; if ns.RefreshUI then ns.RefreshUI() end end,
@@ -659,7 +737,7 @@ local function Build()
     scaleRow, fontRow, padRow, spaceRow, bgRow,
     { dir = "row", align = "center", gap = 8,
       { note = { text = "Text color:", color = "textDim", onBuild = labelTip("Text color",
-          "Default header text color — a name (white, blue, green, gold, red, purple, orange, teal, gray) or a hex code like ffffff.") }, basis = SLIDER_LBL_W },
+          "Default header text color: a name (white, blue, green, gold, red, purple, orange, teal, gray) or a hex code like ffffff.") }, basis = SLIDER_LBL_W },
       { frame = panel.colorBox } },
   }, { setParentHeight = true, settle = rawHeader })
   panel.showDetailCb = hrefs.showDetail
@@ -667,7 +745,7 @@ local function Build()
   -- ===================== DATA: sessions + JSON import/export ====================
   local dtip = pData:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
   dtip:SetPoint("TOPLEFT", 0, -14); dtip:SetWidth(560); dtip:SetJustifyH("LEFT")
-  dtip:SetText("Data is written to disk on " .. Theme.Accent("Save") .. " / Flush — do that at the end of a run.")
+  dtip:SetText("Data is written to disk on " .. Theme.Accent("Save") .. " / Flush. Do that at the end of a run.")
   Theme.Font(dtip, "textDim")
 
   -- Saved Sessions — INLINE collapsible section (was a floating popup). The toggle
@@ -680,7 +758,7 @@ local function Build()
   sessBtn.glyph = sessBtn:CreateTexture(nil, "OVERLAY"); sessBtn.glyph:SetSize(14, 14); sessBtn.glyph:SetPoint("LEFT", 5, 0)
   do local fs = sessBtn:GetFontString(); if fs then fs:ClearAllPoints(); fs:SetPoint("LEFT", sessBtn.glyph, "RIGHT", 5, 0); fs:SetJustifyH("LEFT") end end
   AttachTip(sessBtn, "Saved sessions",
-    "View past saved sessions and Resume one — it reloads the data and keeps the "
+    "View past saved sessions and Resume one. It reloads the data and keeps the "
     .. "clock and totals rolling from where it left off. Sessions are account-wide; "
     .. "each is tagged with the character that ran it.")
   local sessHost = CreateFrame("Frame", nil, pData)
@@ -812,27 +890,31 @@ local function Build()
   lMaxEb:SetPoint("RIGHT", logCountLbl, "LEFT", -8, 0); lMaxEb:SetText(tostring(HaulDB.logShow or 150))
   local lMaxLbl = pLog:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
   lMaxLbl:SetPoint("RIGHT", lMaxEb, "LEFT", -4, 0); lMaxLbl:SetText("show"); Theme.Font(lMaxLbl, "textDim")
-  AttachTip(lMaxEb, "Lines to show", "How many of the most recent log lines to DISPLAY. The full log is always kept — this never trims saved data.")
+  AttachTip(lMaxEb, "Lines to show", "How many of the most recent log lines to DISPLAY. The full log is always kept. This never trims saved data.")
   sectionLine(pLog, 0, -30)
   local GSV = LibStub("GECStoreView-1.0")
   -- collapsed schema (2026-07-09): 9 primary kinds + markers. Attribution rides on `ls`, not separate kinds.
+  -- Log kind colors READ from the shared Theme.NAMED_COLORS single-source (the same source SBF's log
+  -- reads), so one retune there updates both addons' logs. Fallback hex protects against an older
+  -- embedded GECTheme that predates a name.
+  local function kc(name, fb) return (Theme.ColorToHex and Theme.ColorToHex(name)) or fb end
   local HAUL_KINDS = {
-    loot     = { label = "loot",   color = "ffffff" },
-    coin     = { label = "coin",   color = "ffd100" },
-    mail     = { label = "mail $", color = "ffd100" },
-    vendor   = { label = "vendor", color = "ff9933" },
-    rep      = { label = "rep",    color = "66ccff" },
-    currency = { label = "curr",   color = "66ddff" },
-    skill    = { label = "skill",  color = "d0a0ff" },
-    xp       = { label = "xp",     color = "1eff00" },
-    kill     = { label = "kill",   color = "ff8080" },
-    include  = { label = "incl",   color = "808080" },
-    exclude  = { label = "excl",   color = "a0a0a0" },
-    fold     = { label = "fold",   color = "c080ff" },
-    start    = { label = "start",  color = "45c4a0" },
-    stop     = { label = "stop",   color = "ff6060" },
-    pause    = { label = "pause",  color = "ffaa44" },
-    resume   = { label = "resume", color = "45c4a0" },
+    loot     = { label = "loot",   color = kc("white",    "ffffff") },
+    coin     = { label = "coin",   color = kc("coin",     "ffd100") },
+    mail     = { label = "mail $", color = kc("mail",     "ffd100") },
+    vendor   = { label = "vendor", color = kc("vendor",   "ff9933") },
+    rep      = { label = "rep",    color = kc("rep",      "e874c4") },
+    currency = { label = "curr",   color = kc("currency", "66ccff") },
+    skill    = { label = "skill",  color = kc("skill",    "c7a2ff") },
+    xp       = { label = "xp",     color = kc("xp",       "1eff00") },
+    kill     = { label = "kill",   color = kc("kill",     "ff6060") },
+    include  = { label = "incl",   color = kc("include",  "808080") },
+    exclude  = { label = "excl",   color = kc("exclude",  "a0a0a0") },
+    fold     = { label = "fold",   color = kc("fold",     "c080ff") },
+    start    = { label = "start",  color = kc("start",    "45c4a0") },
+    stop     = { label = "stop",   color = kc("stop",     "ff6060") },
+    pause    = { label = "pause",  color = kc("pause",    "ffaa44") },
+    resume   = { label = "resume", color = kc("resume",   "45c4a0") },
   }
   -- source-type label for the `src` attribution descriptor (shown inline on loot/coin/xp rows).
   local LS_LABEL = { fish = "fish", kill = "kill", pickpocket = "pickpocket", herb = "herb", mining = "mining",

@@ -47,7 +47,10 @@ function ns.PriceFrom(src, itemLink)
   local c = priceCache[key]
   if c and (now - c.t) < ttl then return c.v end
   local v = computePriceFrom(src, itemLink)
-  priceCache[key] = { v = v, t = now }
+  -- Do NOT cache a nil VENDOR result: for vendor, nil means the item isn't in the client cache yet (GetItemInfo
+  -- is async), NOT "no value" — caching it would freeze a 0 for the whole TTL even after the item loads. Retry
+  -- instead. For tsm/auctionator, nil DOES mean "no value" and the cache is a needed perf guard, so keep caching.
+  if v ~= nil or src ~= "vendor" then priceCache[key] = { v = v, t = now } end
   return v
 end
 

@@ -16,6 +16,19 @@ local ROW_H       = 18
 -- Header template colors come from GECTheme so every addon shares one palette.
 ns.ColorToHex = Theme.ColorToHex
 ns.ColorName  = Theme.ColorName
+-- Category colors, sourced from the SHARED Theme.NAMED_COLORS single-source (falls back to the literal
+-- hex if an older embedded GECTheme predates the semantic names). Used by the token color table AND the
+-- log gain formatters below, so the log legend, the +amount formatters, and the {tokens} all match.
+local function catHex(name, fallback)
+  return (Theme.ColorToHex and Theme.ColorToHex(name)) or fallback
+end
+local CAT = {
+  xp       = catHex("xp",       "1eff00"),   -- green
+  rep      = catHex("rep",      "e874c4"),   -- pink
+  currency = catHex("currency", "66ccff"),   -- blue
+  kill     = catHex("kill",     "ff6060"),   -- red
+  skill    = catHex("skill",    "c7a2ff"),   -- lilac
+}
 -- "source" is backed by Theme.accentHex so a palette swap picks it up at render time.
 local TOKEN_DEFAULT_COLOR = setmetatable({
   time = "eda55f", ["time.timer"] = "eda55f", ["time.current"] = "eda55f",
@@ -25,28 +38,56 @@ local TOKEN_DEFAULT_COLOR = setmetatable({
   items = "ffffff", ["items.count"] = "ffffff", ["items.last.count"] = "ffffff",
   -- notable / items.notable are now self-colored (the count is wrapped in the notable-quality color
   -- in BuildFields, see notableCount), so they live in MONEY_TOKENS below — not here.
-  rep = "1eff00", ["rep.amount"] = "1eff00", ["rep.faction"] = "ffffff",
+  rep = CAT.rep, ["rep.amount"] = CAT.rep, ["rep.faction"] = "ffffff",
   zone = "ffffff", ["zone.full"] = "ffffff", ["zone.region"] = "ffffff",
   ["zone.zone"] = "ffffff", ["zone.sub"] = "ffffff",
+  xp = CAT.xp, kills = CAT.kill,
+  ["xp.top"] = CAT.xp, ["xp.top.name"] = CAT.xp, ["xp.top.count"] = CAT.xp, ["xp.top.amount"] = CAT.xp,
+  ["xp.top.category"] = CAT.xp, ["xp.top.category.name"] = CAT.xp, ["xp.top.category.amount"] = CAT.xp,
+  ["kills.top"] = CAT.kill, ["kills.top.name"] = CAT.kill, ["kills.top.count"] = CAT.kill,
+  currency = CAT.currency, ["currency.name"] = CAT.currency, ["currency.top"] = CAT.currency,
+  ["currency.detail"] = CAT.currency,
+  skill = CAT.skill, ["skill.perhour"] = CAT.skill,
+  ["skill.top"] = CAT.skill, ["skill.top.name"] = CAT.skill, ["skill.top.count"] = CAT.skill, ["skill.top.amount"] = CAT.skill,
+  -- per-hour rate tokens (Task 2): same hues as their base totals above.
+  ["xp.perhour"] = CAT.xp, ["rep.perhour"] = CAT.rep,
+  ["currency.perhour"] = CAT.currency, ["kills.perhour"] = CAT.kill,
+  -- per-category {<cat>.last} tokens (Task 3): plain-text pieces only — the money/quality-colored
+  -- composites (mail.last*, mail.last.item) are self-colored and live in MONEY_TOKENS instead.
+  ["xp.last"] = CAT.xp, ["xp.last.count"] = CAT.xp, ["xp.last.amount"] = CAT.xp,
+  ["xp.last.name"] = CAT.xp, ["xp.last.source"] = CAT.xp, ["xp.last.value"] = CAT.xp,
+  ["rep.last"] = CAT.rep, ["rep.last.count"] = CAT.rep, ["rep.last.amount"] = CAT.rep,
+  ["rep.last.name"] = "ffffff", ["rep.last.value"] = CAT.rep,
+  ["currency.last"] = CAT.currency, ["currency.last.count"] = CAT.currency, ["currency.last.amount"] = CAT.currency,
+  ["currency.last.name"] = CAT.currency, ["currency.last.value"] = CAT.currency,
+  ["kills.last"] = CAT.kill, ["kills.last.name"] = CAT.kill, ["kills.last.count"] = CAT.kill,
+  ["kills.last.value"] = CAT.kill,
+  ["skill.last"] = CAT.skill, ["skill.last.count"] = CAT.skill, ["skill.last.amount"] = CAT.skill,
+  ["skill.last.name"] = CAT.skill, ["skill.last.value"] = CAT.skill, ["skill.last.level"] = CAT.skill,
+  -- mail.last / .value / .gold / .item are self-colored (money strings + quality-colored item link)
+  -- and are declared in MONEY_TOKENS below, not here.
+  -- {last} polymorphic pieces (Task 4): plain white — the composite "last" itself is in MONEY_TOKENS.
+  -- last.value is a MoneyShort money string in the loot/mail branches (self-colored) and lives in
+  -- MONEY_TOKENS below, not here.
+  ["last.kind"] = "ffffff", ["last.name"] = "ffffff", ["last.count"] = "ffffff",
+  ["last.amount"] = "ffffff", ["last.source"] = "ffffff",
+  ["last.perhour"] = "ffffff",
 }, { __index = function(_, k) if k == "source" then return Theme.accentHex end end })
--- price-trend display. Texture arrows (tinted) — the default WoW font has no ▲/▼
--- glyph, so Unicode triangles render as a box. Self-colored so the token's base
--- color can't recolor them. Kept identical to Megaphone's TrendText.
--- the :0:-3 is offsetX:offsetY — the negative Y drops the arrow down so it centers
--- on the text line instead of floating up at the baseline top.
-local TR_UP   = "|TInterface\\Buttons\\Arrow-Up-Up:14:14:0:-3:32:32:0:32:0:32:30:255:0|t"
-local TR_DOWN = "|TInterface\\Buttons\\Arrow-Down-Up:14:14:0:-3:32:32:0:32:0:32:255:96:96|t"
-local TREND_DISPLAY = {
-  up   = TR_UP   .. " |cff1eff00up|r",
-  down = TR_DOWN .. " |cffff6060down|r",
-  flat = "|cff808080flat|r",
-}
+-- price-trend display now lives in GECWowToken-1.0 (the one shared copy, so the arrow-centring fix applies
+-- to Haul AND Gadgets/Megaphone at once). Haul still computes the trend (Token.lua / ns.TokenTrend); this
+-- just renders it through the lib. Falls back to a dash if the lib somehow isn't loaded.
+local GECWowToken = LibStub and LibStub:GetLibrary("GECWowToken-1.0", true)
+local function TrendDisplay(trend)
+  -- trend is now just a colored word (up/down/flat) — text, so it scales with the font on its own.
+  return (GECWowToken and GECWowToken.TrendDisplay and GECWowToken.TrendDisplay(trend)) or "-"
+end
 -- self-colored tokens: money values + quality-colored item names. RenderTemplate
 -- returns these verbatim so the template's base/`:color` can't recolor them. Every
 -- money base also implies <base>.short (largest unit) and <base>.full (g/s/c).
 local MONEY_TOKENS = {}
 for _, n in ipairs({
-  "haul", "total", "loot", "gross", "gross.perhour", "perhour", "cash",
+  "haul", "total", "loot", "gross", "gross.perhour", "perhour", "cash", "mail", "mail.gold",
+  "mail.perhour", "gold.perhour",
   "token.price", "tokenprice", "token.value",
   "items.value", "items.price", "items.last.value", "items.last.price",
 }) do
@@ -55,7 +96,15 @@ end
 -- quality-colored item names / composites (also returned verbatim)
 for _, n in ipairs({ "items.last", "items.last.short", "items.last.full", "items.last.name",
                      "notable", "items.notable", "items.notable.label",
-                     "rep.top", "rep.detail", "flushed" }) do
+                     "rep.top", "rep.detail", "flushed",
+                     -- mail.last* (Task 3): .last/.value/.gold are ns.MoneyShort money strings (self-colored);
+                     -- .item carries a quality-colored item link.
+                     "mail.last", "mail.last.value", "mail.last.gold", "mail.last.item",
+                     -- {last} (Task 4): polymorphic composite copied verbatim from whichever
+                     -- per-category .last field matched — that source may already be self-colored
+                     -- (loot item name, mail money string), so it must pass through raw too.
+                     -- last.value (final-review fix): MoneyShort money string in the loot/mail branches.
+                     "last", "last.value" }) do
   MONEY_TOKENS[n] = true
 end
 -- notable threshold name + color, by quality (drives the "Uncommon+: N" label)
@@ -557,7 +606,7 @@ local REP_ICON = "Interface\\Icons\\Achievement_Reputation_01"
 -- Signed rep amount: green +N for gains, red −N for losses (amt already carries the minus), gray 0.
 local function RepValue(amt)
   amt = amt or 0
-  if amt > 0 then return "|cff1eff00+" .. amt .. "|r" end
+  if amt > 0 then return "|cff" .. CAT.rep .. "+" .. amt .. "|r" end
   if amt < 0 then return "|cffff6060" .. amt .. "|r" end
   return "|cff8080800|r"
 end
@@ -620,7 +669,7 @@ ns.CurrencyName = function(id) return (CurrencyInfo(id)) end   -- quality-colore
 local function CurrencyValue(amt)
   amt = amt or 0
   local n = (BreakUpLargeNumbers and BreakUpLargeNumbers(amt)) or amt
-  if amt > 0 then return "|cff1eff00+" .. n .. "|r" end
+  if amt > 0 then return "|cff" .. CAT.currency .. "+" .. n .. "|r" end
   return "|cff808080" .. n .. "|r"
 end
 ns.CurrencyValue = CurrencyValue
@@ -674,7 +723,7 @@ ns.ProfLineName = function(id, fb) return ProfLineName(id, fb) end   -- Data-tab
 -- skill-ups are plain counts (not money): green +N.
 local function ProfValue(amt)
   amt = amt or 0
-  if amt > 0 then return "|cff1eff00+" .. amt .. "|r" end
+  if amt > 0 then return "|cff" .. CAT.skill .. "+" .. amt .. "|r" end
   return "|cff808080" .. amt .. "|r"
 end
 ns.ProfValue = ProfValue
@@ -1065,6 +1114,72 @@ function ns.BuildSessionEntries(h, category, groupOpen, onToggle, colPct)
   return BuildLootCollectionEntries()
 end
 
+-- Scan ns.session.log backward, newest-first, returning the first row matching pred (a function(row)->bool),
+-- or nil. Used by every {<cat>.last} resolver so they share one traversal contract.
+-- hasAny is a CHEAP category-has-data gate (an already-computed aggregate). When it's explicitly false the
+-- category has no matching rows, so we skip the scan entirely — otherwise a zero-row category (e.g. XP/rep/
+-- currency/kills in a fishing session) would traverse the WHOLE log every BuildFields (1/sec). Passing nil
+-- (unguarded, e.g. the universal {last}) still scans, but those exit fast (loot rows are frequent).
+local function scanLast(pred, hasAny)
+  if hasAny == false then return nil end
+  local s = ns.session
+  local log = s and s.log
+  if not log then return nil end
+  for i = #log, 1, -1 do
+    local r = log[i]
+    if pred(r) then return r end
+  end
+  return nil
+end
+-- Format an XP source descriptor (row.src = { t=<kind>, name/node/zone/title }) into "Quest: X" / "Kill: Y" /
+-- "Gather: Z" / "Discovery: W" / "" (unknown/"other"). Never errors on a missing field.
+local function xpSourceLabel(src)
+  if type(src) ~= "table" then return "" end
+  local t = src.t
+  if t == "quest" then return "Quest: " .. (src.title or src.name or "?")
+  elseif t == "kill" then return "Kill: " .. (src.name or "?")
+  elseif t == "gather" then return "Gather: " .. (src.node or src.name or "?")
+  elseif t == "disc" then return "Discovery: " .. (src.zone or src.name or "?")
+  else return "" end
+end
+-- Non-user-facing kinds excluded from the universal {last}: vendor (log-only spend) + mob-attribution
+-- subsets that duplicate loot/kill/xp rows. Used by the {last} resolver's predicate below.
+-- ORDERING NOTE: the predicate checks `x.link` first and only falls through to `not LAST_EXCLUDE[x.kind]`
+-- for rows without a link. That's only correct because link-bearing (loot) rows never carry a `kind` today
+-- — if that ever changes, this exclusion would need to apply to loot rows too.
+local LAST_EXCLUDE = { vendor = true, mobloot = true, gatherloot = true, mobcash = true, looted = true }
+-- Format ONE log row into its human "last"-style string, by category — the {<cat>.last} composites.
+local function fmtRow(r)
+  if not r then return "-" end
+  if r.link then
+    local _, glink, q, _, _, _, _, _, _, _, sell, _, _, bind = GetItemInfo(r.link)
+    local n = r.count or 1
+    -- ONE pricing rule (ns.UnitValue): gray/BoP vendor-only + cold-cache fallback, same as every other site.
+    local frozen = (r.val and n > 0) and (r.val / n) or nil
+    local v = ns.UnitValue(r.link, sell, q, bind, frozen) * n
+    return (glink or r.link) .. "  x" .. n .. "   " .. ns.MoneyShort(v)
+  elseif r.kind == "xp" then
+    local lbl = xpSourceLabel(r.src)
+    return "+" .. math.floor(r.amount or 0) .. " XP" .. (lbl ~= "" and (" \194\183 " .. lbl) or "")
+  elseif r.kind == "rep" then
+    local fac = (ns.RepName and ns.RepName(r.f)) or r.f
+    return ((r.amount or 0) >= 0 and "+" or "") .. (r.amount or 0) .. " " .. tostring(fac)
+  elseif r.kind == "currency" then
+    local ci = C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo and C_CurrencyInfo.GetCurrencyInfo(r.cid)
+    return ((r.amount or 0) >= 0 and "+" or "") .. (r.amount or 0) .. " " .. ((ci and ci.name) or tostring(r.cid))
+  elseif r.kind == "kill" then
+    return r.name or "?"
+  elseif r.kind == "mail" then
+    return ns.MoneyShort(r.amount or 0)
+  elseif r.kind == "skill" then
+    return (r.name or "skill") .. " " .. (r.lvl or "")
+  end
+  return "-"
+end
+-- (Multi-item {<cat>.last.list} / {<cat>.last.cycle} rendering was removed — that presentation belongs
+--  in the template engine, not here; see docs/superpowers/specs/2026-07-29-gectemplate-parameterized-
+--  presentation-design.md. fmtRow above stays: it still formats each {<cat>.last} composite.)
+
 -------------------------------------------------------------- template render --
 -- Build the token table once per refresh; shared by the main bar AND watchers.
 function ns.BuildFields()
@@ -1089,10 +1204,14 @@ function ns.BuildFields()
       end
     end
     if last then
-      local _, glink, _, _, _, _, _, _, _, _, sell = GetItemInfo(last.link)
+      local _, glink, q, _, _, _, _, _, _, _, sell, _, _, bind = GetItemInfo(last.link)
       lastName = glink or last.link or "-"
       lastCount = last.count or 1
-      lastVal = (ns.GetUnitValue(last.link, sell) or 0) * lastCount
+      -- ONE pricing rule (ns.UnitValue). This used to call GetUnitValue directly with no gray/BoP rule, so
+      -- with priceSource = tsm a soulbound epic showed market value here and vendor value in its Collection
+      -- row, in {haul}, and in the banked snapshot. last.val is the frozen TOTAL, hence /count for per-unit.
+      local frozen = (last.val and lastCount > 0) and (last.val / lastCount) or nil
+      lastVal = ns.UnitValue(last.link, sell, q, bind, frozen) * lastCount
       -- numeric itemID of the last drop, PLAIN, so it can be a nested arg:
       -- {count.account({haul.items.last.id})}. "" when there's no id.
       lastId = (last.link and tostring(last.link):match("item:(%d+)")) or ""
@@ -1157,7 +1276,7 @@ function ns.BuildFields()
     token = st.tokenPct and string.format("%.4f%%", st.tokenPct) or "-",
     ["token.percent"] = st.tokenPct and string.format("%.4f%%", st.tokenPct) or "-",
     -- token.price / tokenprice / token.value populated below (money, guarded by tp)
-    ["token.trend"] = TREND_DISPLAY[(ns.TokenTrend and ns.TokenTrend()) or "flat"] or "-",
+    ["token.trend"] = TrendDisplay((ns.TokenTrend and ns.TokenTrend()) or "flat"),
     rep = repTotal ~= 0 and tostring(repTotal) or "",
     ["rep.amount"] = repTotal ~= 0 and tostring(repTotal) or "",
     ["rep.faction"] = repTop or "",
@@ -1176,12 +1295,22 @@ function ns.BuildFields()
     loot = st.loot or (st.counted - st.coin),
     gross = st.gross, ["gross.perhour"] = st.grossPerHour,
     perhour = st.goldPerHour, cash = st.coin,
+    mail = st.mailGold,          -- {mail} defaults to mail GOLD
+    -- mail gold/hr is money like every other rate here, so it belongs IN this loop. Hand-written
+    -- outside it, only the bare field existed and {mail.perhour.full} rendered the literal "nil".
+    ["mail.perhour"] = ns.PerHour(st.mailGold or 0),
   }
   for name, copper in pairs(moneyCopper) do
     local short = ns.MoneyShort(copper)
     fields[name], fields[name .. ".short"], fields[name .. ".full"] = short, short, ns.Money(copper)
     fields[name .. ".copper"] = math.floor(copper or 0)   -- raw copper integer (consumer formats it)
   end
+  fields["mail.gold"] = fields["mail"]   -- explicit alias of bare {mail}
+  fields["mail.gold.short"], fields["mail.gold.full"] = fields["mail.short"], fields["mail.full"]
+  fields["mail.gold.copper"] = fields["mail.copper"]
+  fields["gold.perhour"] = fields["perhour"]                     -- alias of the existing gold {perhour}
+  fields["gold.perhour.short"], fields["gold.perhour.full"] = fields["perhour.short"], fields["perhour.full"]
+  fields["gold.perhour.copper"] = fields["perhour.copper"]
   -- raw-copper for the item-value tokens too (same copper that valShort/valFull formatted above)
   fields["items.value.copper"] = math.floor(st.loot or 0)
   fields["items.price.copper"] = math.floor(st.loot or 0)
@@ -1195,7 +1324,251 @@ function ns.BuildFields()
     fields[name], fields[name .. ".short"], fields[name .. ".full"] = tpShort, tpShort, tpFull
     fields[name .. ".copper"] = tpCopper
   end
-  if ns.VaultFields then for k, v in pairs(ns.VaultFields()) do fields[k] = v end end
+  -- WoW Token all-time stats (from GECWowToken); "-" until the lib has history. {token.high/low/avg}
+  do
+    local wt = ns.WowToken
+    local stats = wt and wt.GetStats and wt.GetStats()
+    local hi  = stats and stats.high and stats.high.price
+    local lo  = stats and stats.low  and stats.low.price
+    local avg = stats and stats.avg
+    for name, cp in pairs({ ["token.high"] = hi, ["token.low"] = lo, ["token.avg"] = avg }) do
+      local short = (cp and cp > 0 and ns.MoneyShort(cp)) or "-"
+      local full  = (cp and cp > 0 and ns.Money(cp)) or "-"
+      fields[name], fields[name .. ".short"], fields[name .. ".full"] = short, short, full
+      fields[name .. ".copper"] = (cp and cp > 0 and math.floor(cp)) or 0
+    end
+  end
+  -- ---- category totals (parity with {items.count} / {rep}) ----
+  do
+    local s = ns.session
+    -- XP total (st.xp is the authoritative running total)
+    fields["xp"] = tostring(math.floor(st.xp or 0))
+    -- {xp.top} — the single SOURCE that gave the most XP this session, labeled like {xp.last}'s source:
+    -- "Quest: <name>" / "Kill: <mob>" / "Discovery: <zone>" / "Gather: <node>". Ranks per-source across all
+    -- breakdowns (quests aggregate by title). Without this field, {xp.top} would fall back to the {xp} total.
+    do
+      local lbl, amt = nil, 0
+      local function consider(l, a) if (a or 0) > amt then lbl, amt = l, a or 0 end end
+      local byTitle = {}
+      for _, e in ipairs((s and s.xpQuestLog) or {}) do local ti = e.title or "?"; byTitle[ti] = (byTitle[ti] or 0) + (e.amount or 0) end
+      for ti, a in pairs(byTitle) do consider("Quest: " .. ti, a) end
+      for mob, m in pairs((s and s.xpMobs) or {}) do consider("Kill: " .. mob, m.xp) end
+      for zone, a in pairs((s and s.xpZones) or {}) do consider("Discovery: " .. zone, a) end
+      for node, nd in pairs((s and s.xpNodes) or {}) do consider("Gather: " .. node, nd.xp) end
+      local amtStr = (BreakUpLargeNumbers and BreakUpLargeNumbers(amt)) or tostring(amt)
+      fields["xp.top"] = lbl and (lbl .. "  +" .. amtStr) or ""
+      fields["xp.top.name"] = lbl or ""
+      fields["xp.top.count"] = tostring(amt)
+      fields["xp.top.amount"] = tostring(amt)
+    end
+    -- {xp.top.category} — which SOURCE TYPE gave the most XP (Kills / Quest / Discovery / Gather), excluding "other"
+    do
+      local tc, tv = "", 0
+      for _, c in ipairs({ { "Kills", (s and s.xpKill) or 0 }, { "Quest", (s and s.xpQuest) or 0 },
+                           { "Discovery", (s and s.xpDiscovery) or 0 }, { "Gather", (s and s.xpGather) or 0 } }) do
+        if c[2] > tv then tc, tv = c[1], c[2] end
+      end
+      local catAmt = (BreakUpLargeNumbers and BreakUpLargeNumbers(tv)) or tv
+      fields["xp.top.category"] = (tv > 0) and (tc .. "  +" .. catAmt) or ""
+      fields["xp.top.category.name"] = (tv > 0) and tc or ""
+      fields["xp.top.category.amount"] = tostring(tv)
+    end
+    -- Currency: total units gained across all currencies (mirrors {rep} summing factions),
+    -- plus a rep-style top/detail. s.currency is currencyId -> amount gained this session.
+    local curTotal, curTop, curTopAmt, curName, curParts = 0, nil, 0, "", {}
+    for cid, amt in pairs((s and s.currency) or {}) do
+      curTotal = curTotal + amt
+      local ci = C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo and C_CurrencyInfo.GetCurrencyInfo(cid)
+      local nm = (ci and ci.name) or tostring(cid)
+      if curTop == nil or amt > curTopAmt then curTop, curTopAmt, curName = nm, amt, nm end
+      curParts[#curParts + 1] = nm .. " " .. (amt > 0 and ("+" .. amt) or tostring(amt))
+    end
+    table.sort(curParts)
+    fields["currency"] = curTotal ~= 0 and tostring(curTotal) or ""
+    fields["currency.name"] = curName
+    fields["currency.top"] = curTop and (curTop .. " +" .. curTopAmt) or ""
+    fields["currency.detail"] = (#curParts > 0 and table.concat(curParts, "   ")) or ""
+    -- Kills total
+    fields["kills"] = tostring((s and s.killCount) or 0)
+    -- {kills.top} — the mob you've killed the MOST (name + count), like {rep.top}/{currency.top}
+    do
+      local tn, tc = nil, 0
+      for id, k in pairs((s and s.kills) or {}) do
+        if (k.count or 0) > tc then tn, tc = k.name or ("npc " .. id), k.count or 0 end
+      end
+      fields["kills.top"] = tn and (tn .. "  x" .. tc) or ""
+      fields["kills.top.name"] = tn or ""
+      fields["kills.top.count"] = tostring(tc)
+    end
+    -- Mail: bare = GOLD, filled by the money loop above. There is deliberately no {mail.items}: the
+    -- vocabulary here is {items} = COUNT and {items.value} = money, so a bare {mail.items} returning a
+    -- money string contradicts the pattern every other category teaches. If mail item value is wanted on
+    -- the bar, add it as the pair {mail.items} (count) + {mail.items.value} (money), not as one field.
+    -- Skill (profession skill-ups): total points gained this session, summed from the log (no map exists)
+    local skillTotal = 0
+    for _, sr in ipairs((s and s.log) or {}) do if sr.kind == "skill" then skillTotal = skillTotal + (sr.amount or 0) end end
+    fields["skill"] = skillTotal ~= 0 and tostring(skillTotal) or ""
+    -- {skill.top} — the profession with the MOST points gained this session. Aggregate by lineID (pid)
+    -- and resolve the display name via ProfLineName (raw name, color stripped so the token's own skill
+    -- color applies uniformly) — the log row's own .name can be blank.
+    do
+      local agg, nameOf = {}, {}
+      for _, sr in ipairs((s and s.log) or {}) do
+        if sr.kind == "skill" then
+          local pid = sr.pid or 0
+          agg[pid] = (agg[pid] or 0) + (sr.amount or 0)
+          nameOf[pid] = nameOf[pid] or sr.name
+        end
+      end
+      local tpid, ta = nil, 0
+      for pid, amt in pairs(agg) do if amt > ta then tpid, ta = pid, amt end end
+      local nm = ""
+      if tpid then
+        local raw = (ns.ProfLineName and ns.ProfLineName(tpid, nameOf[tpid])) or nameOf[tpid] or "skill"
+        nm = raw:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+      end
+      fields["skill.top"] = (nm ~= "") and (nm .. "  +" .. ta) or ""
+      fields["skill.top.name"] = nm
+      fields["skill.top.count"] = tostring(ta)
+      fields["skill.top.amount"] = tostring(ta)
+    end
+    -- ---- per-hour rates (ns.PerHour clamps the denominator) ----
+    -- ratefmt: a big rate floors (decimals are noise); a SMALL-count rate (e.g. 1 skill-up over a long
+    -- session ≈ 0.3/hr) keeps one decimal so it doesn't round away to a misleading 0. Whole numbers and
+    -- rates ≥ 10 drop the decimal ("3", "60"), so only genuine fractions show it ("0.3").
+    local function ratefmt(n) n = tonumber(n) or 0
+      if n >= 10 or n == math.floor(n) then return tostring(math.floor(n)) end
+      return string.format("%.1f", n) end
+    fields["xp.perhour"] = tostring(math.floor(ns.PerHour(st.xp or 0)))       -- big numbers: floor
+    fields["rep.perhour"] = tostring(math.floor(ns.PerHour(repTotal)))        -- big numbers: floor
+    fields["currency.perhour"] = ratefmt(ns.PerHour(curTotal))               -- small counts: keep a decimal
+    fields["kills.perhour"] = ratefmt(ns.PerHour((s and s.killCount) or 0))  -- small counts: keep a decimal
+    fields["skill.perhour"] = ratefmt(ns.PerHour(skillTotal))                -- small counts: keep a decimal
+    -- ---- {<cat>.last} — most recent row of each kind, formatted per-category ----
+    -- XP: prefer the labeled subset row (has src => carries the source); fall back to the total row.
+    do
+      local hasXp = (st.xp or 0) > 0
+      local r = scanLast(function(x) return x.kind == "xp" and x.src end, hasXp)
+              or scanLast(function(x) return x.kind == "xp" end, hasXp)
+      local amt = r and math.floor(r.amount or 0) or 0
+      local srcLabel = r and xpSourceLabel(r.src) or ""
+      fields["xp.last.count"] = tostring(amt)
+      fields["xp.last.amount"] = tostring(amt)
+      fields["xp.last.name"] = srcLabel
+      fields["xp.last.source"] = srcLabel
+      fields["xp.last.value"] = "-"
+      fields["xp.last"] = fmtRow(r)   -- byte-identical to the prior inline "+N XP · src" composite
+    end
+    -- Rep
+    do
+      local r = scanLast(function(x) return x.kind == "rep" end, repTotal ~= 0)
+      local amt = r and (r.amount or 0) or 0
+      local fac = r and ((ns.RepName and ns.RepName(r.f)) or r.f) or ""
+      fields["rep.last.count"] = tostring(amt)
+      fields["rep.last.amount"] = tostring(amt)
+      fields["rep.last.name"] = fac
+      fields["rep.last.value"] = "-"
+      fields["rep.last"] = fmtRow(r)   -- byte-identical to the prior inline "+N faction" composite
+    end
+    -- Currency
+    do
+      local r = scanLast(function(x) return x.kind == "currency" end, curTotal ~= 0)
+      local amt = r and (r.amount or 0) or 0
+      local ci = r and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo and C_CurrencyInfo.GetCurrencyInfo(r.cid)
+      local nm = (ci and ci.name) or (r and tostring(r.cid)) or ""
+      fields["currency.last.count"] = tostring(amt)
+      fields["currency.last.amount"] = tostring(amt)
+      fields["currency.last.name"] = nm
+      fields["currency.last.value"] = "-"
+      fields["currency.last"] = fmtRow(r)   -- byte-identical to the prior inline "+N currency" composite
+    end
+    -- Kills: s.kills[id] = { name, count, xp, cash, loot, looted } (npcID-keyed; see Core.lua ensureKill)
+    do
+      local r = scanLast(function(x) return x.kind == "kill" end, ((s and s.killCount) or 0) > 0)
+      local nm = r and (r.name or "?") or ""
+      local tally = 0
+      if r and s and s.kills and s.kills[r.id] then tally = s.kills[r.id].count or 1 end
+      fields["kills.last.name"] = nm
+      fields["kills.last.count"] = tostring(r and (tally > 0 and tally or 1) or 0)
+      fields["kills.last.value"] = "-"
+      fields["kills.last"] = fmtRow(r)   -- byte-identical to the prior inline "mob name" composite
+    end
+    -- Mail: bare .last = last mail GOLD (money); .item = last mailed item composite
+    do
+      local r = scanLast(function(x) return x.kind == "mail" end, (st.mailGold or 0) ~= 0)
+      fields["mail.last.value"] = fmtRow(r)   -- byte-identical to the prior inline MoneyShort(gold) composite
+      fields["mail.last.gold"] = fields["mail.last.value"]
+      fields["mail.last"] = fields["mail.last.value"]
+      -- last mailed ITEM: an item row whose acquisition context is mail (from == "mail")
+      local ri = scanLast(function(x) return x.link and x.from == "mail" end)
+      if ri then
+        local _, glink = GetItemInfo(ri.link)
+        fields["mail.last.item"] = (glink or ri.link) .. "  x" .. (ri.count or 1)
+      else
+        fields["mail.last.item"] = "-"
+      end
+    end
+    -- Skill (profession skill-ups): last = "Fishing 285" (name + new level), same as the {last} skill branch
+    do
+      local r = scanLast(function(x) return x.kind == "skill" end, (skillTotal or 0) > 0)
+      fields["skill.last.name"] = r and (r.name or "skill") or ""
+      fields["skill.last.count"] = tostring(r and (r.amount or 0) or 0)
+      fields["skill.last.amount"] = fields["skill.last.count"]
+      fields["skill.last.level"] = tostring(r and (r.lvl or "") or "")
+      fields["skill.last.value"] = "-"
+      fields["skill.last"] = fmtRow(r)
+    end
+    -- ({<cat>.last.list} and {<cat>.last.cycle} were removed — multi-item presentation moves to the
+    --  template engine per docs/superpowers/specs/2026-07-29-gectemplate-parameterized-presentation-design.md.)
+    -- ---- universal {last}: most recent USER-FACING gain of any kind, formatted by its category ----
+    -- Reuses the per-category .last/.perhour fields computed just above — never recomputed here.
+    do
+      -- user-facing kinds only: loot (row has a link, no kind), xp, rep, currency, kill, mail, skill.
+      -- exclude vendor (log-only spend) + mob-attribution subsets that duplicate loot/kill/xp rows.
+      -- see the LAST_EXCLUDE ordering note above scanLast/fmtRow: link-bearing rows are checked first.
+      local r = scanLast(function(x)
+        if x.link then return true end                 -- loot item row (no kind)
+        return x.kind ~= nil and not LAST_EXCLUDE[x.kind]
+      end)
+      local kind, disp, nm, cnt, val, srcTag, per = "", "-", "", "0", "-", "", "0"
+      if r then
+        if r.link then
+          kind = "loot"; disp = fields["items.last"]; nm = fields["items.last.name"]
+          cnt = fields["items.last.count"]; val = fields["items.last.value"]; per = fields["perhour"]
+        elseif r.kind == "xp" then
+          kind = "xp"; disp = fields["xp.last"]; nm = fields["xp.last.name"]
+          cnt = fields["xp.last.count"]; srcTag = fields["xp.last.source"]; per = fields["xp.perhour"]
+        elseif r.kind == "rep" then
+          kind = "rep"; disp = fields["rep.last"]; nm = fields["rep.last.name"]
+          cnt = fields["rep.last.count"]; per = fields["rep.perhour"]
+        elseif r.kind == "currency" then
+          kind = "currency"; disp = fields["currency.last"]; nm = fields["currency.last.name"]
+          cnt = fields["currency.last.count"]; per = fields["currency.perhour"]
+        elseif r.kind == "kill" then
+          kind = "kill"; disp = fields["kills.last"]; nm = fields["kills.last.name"]
+          cnt = fields["kills.last.count"]; per = fields["kills.perhour"]
+        elseif r.kind == "mail" then
+          -- mail has no per-category .last.name/.count field (Task 3 only produced .value/.gold/.item);
+          -- surface the mailed item name when there was one, else leave blank.
+          kind = "mail"; disp = fields["mail.last"]; nm = ""
+          val = fields["mail.last.value"]; per = fields["mail.perhour"]
+        elseif r.kind == "skill" then
+          -- no {skill.last*} category exists (Task 3 didn't add one) — build directly from the row.
+          kind = "skill"; nm = r.name or ""
+          disp = nm .. (r.lvl and (" " .. tostring(r.lvl)) or "")
+          cnt = tostring(math.floor(r.amount or 0))
+        end
+      end
+      fields["last"] = disp
+      fields["last.kind"] = kind
+      fields["last.name"] = nm
+      fields["last.count"] = cnt
+      fields["last.amount"] = cnt
+      fields["last.value"] = val
+      fields["last.source"] = srcTag
+      fields["last.perhour"] = per
+    end
+  end
   -- cross-addon: SBF (Single-Button Fishing) exposes its state + skill readout as {sbf.*} tokens.
   if SBF then
     if SBF.GetNext then fields["sbf.next"] = SBF.GetNext() end
@@ -1216,6 +1589,11 @@ function ns.BuildFields()
   -- disk-flush state of the live session: on disk (clean since the last write) vs unsaved changes.
   -- Self-colored (in MONEY_TOKENS) so the template can't recolor it.
   fields.flushed = ns._dirty and "|cffff6060unsaved|r" or "|cff45c4a0on disk|r"
+  -- Snapshot the freshly-built fields so a second consumer this tick (the GECData feed) can REUSE them
+  -- instead of running this whole (expensive) pass again. When the window is up it computes 1/sec; the
+  -- feed reads the snapshot rather than double-computing. (Feed.lua only builds itself when the window is
+  -- hidden AND a consumer is actively reading — see there.)
+  ns._fieldsSnap = { t = (GetTime and GetTime()) or 0, fields = fields }
   return fields, st, tp, src
 end
 
@@ -1263,18 +1641,23 @@ end
 function ns.OutputTokens()
   local seen, out = {}, {}
   local function add(n, typ)
-    if n and not seen[n] then seen[n] = true; out[#out + 1] = { name = n, type = typ or (ns.IsRawToken(n) and "raw" or "text") } end
+    if n and not seen[n] then
+      seen[n] = true
+      local ty = typ or (ns.IsRawToken(n) and "raw" or "text")
+      -- default color for text tokens = their TOKEN_DEFAULT_COLOR hex, exported so the feed can hand a
+      -- consumer (Gadgets) an OVERRIDABLE default color. raw/money tokens self-color → no default needed.
+      local col = (ty == "text") and rawget(TOKEN_DEFAULT_COLOR, n) or nil
+      out[#out + 1] = { name = n, type = ty, color = col }
+    end
   end
   for n in pairs(MONEY_TOKENS) do add(n) end
   for n in pairs(TOKEN_DEFAULT_COLOR) do add(n) end   -- pairs() skips the metatable "source"
   add("rep"); add("source")                            -- the two buildTokenSpec adds explicitly
   add("items.last.id", "text")                         -- numeric itemID, plain → nestable as an arg
-  -- Great Vault tokens (vault.<track>.<field> + bare + vault.ready), sourced statically from Vault.lua
-  -- so the feed lists them even before the first vault query; BuildFields merges the live values.
-  if ns.VaultTokens then for _, n in ipairs(ns.VaultTokens()) do add(n, "text") end end
   -- .copper number tokens for every money base + flavor (haul/loot/cash/perhour/… incl .short/.full).
   -- These mirror the copper fields BuildFields now stores; a number type so it's colorable/formattable.
   for _, base in ipairs({ "haul", "total", "loot", "gross", "gross.perhour", "perhour", "cash",
+                          "mail", "mail.gold", "mail.perhour",
                           "token.price", "tokenprice", "token.value",
                           "items.value", "items.price", "items.last.value", "items.last.price" }) do
     add(base .. ".copper", "number")
@@ -1292,7 +1675,7 @@ local Tpl = LibStub and LibStub("GECTemplate-1.0", true)
 -- DEV-ONLY: consuming outside (cross-addon GEC) feeds is gated behind Haul.IsDev(). Run from
 -- PLAYER_LOGIN (Core) — after SavedVariables load — so the runtime `/haul dev` toggle (HaulDB.dev)
 -- governs it; at file-load time HaulDB isn't loaded yet, so IsDev() couldn't see the saved flag.
--- Haul's native pricing/token/vault feeds are untouched (always on).
+-- Haul's native pricing/token feeds are untouched (always on).
 function ns.InitFeedConsumer()
   if not (Haul and Haul.IsDev and Haul.IsDev()) then return end
   local GECData = LibStub and LibStub("GECData-1.0", true)
@@ -1340,8 +1723,19 @@ function ns.RenderTemplate(template, fields)
   return template or ""   -- degraded fallback if the shared lib somehow didn't load
 end
 
+-- Save = flush-to-disk (reload). Reloading is a protected action that only succeeds from a hardware
+-- click when it's safe, so the Save button is DISABLED while unsafe (casting / channel / open loot
+-- window / combat) and enables the instant you're clear — every click then hits the known-good reload
+-- path. Driven by Flush.lua's safety-edge watcher and by the per-refresh sync below. nil-safe before
+-- the UI is built (the watcher can fire early).
+function ns.UpdateSaveEnabled()
+  local b = win and win.btnSave
+  if not b then return end
+  b:SetEnabled((not ns.SafeNow) or ns.SafeNow())
+end
+
 ------------------------------------------------------------------ refresh ----
-function ns.RefreshUI()
+local function DoRefreshUI()
   if not win or not win:IsShown() then return end   -- hidden window: skip the whole (expensive) BuildFields/ComputeStats pass
   local fields = ns.BuildFields()
   win.barText:SetText(ns.RenderTemplate(
@@ -1363,9 +1757,36 @@ function ns.RefreshUI()
   if ns.ApplyTrackingTint then ns.ApplyTrackingTint() end
   win.btnTrack:SetText(ns.IsTracking() and "Pause" or "Resume")
   if ns.UpdatePlayButton then ns.UpdatePlayButton() end
+  if ns.UpdateSaveEnabled then ns.UpdateSaveEnabled() end   -- keep Save's enabled state fresh each refresh (safety net for the event watcher)
   if win.list:IsShown() and win.accordion then
     win.accordion:SetEntries(BuildEntries())   -- builds for the active (category, view)
   end
+end
+
+-- COALESCED REFRESH. Every income recorder (loot, coin, xp, rep, currency, skill, kill, vendor, mail…)
+-- calls ns.RefreshUI, and each pass is a full log replay. During a pull that fires many times a second,
+-- and the cost climbs with the length of the session log — so the frame cost grew as the run got longer,
+-- worst exactly when the frames matter. This throttles to at most one pass per refreshThrottle seconds:
+-- LEADING edge runs immediately (so a single loot still updates instantly and the UI never feels laggy),
+-- and anything arriving inside the window is collapsed into ONE trailing pass at the end of it.
+-- Set HaulDB.refreshThrottle = 0 to restore the old refresh-on-every-event behavior.
+local refreshLast, refreshPending = 0, false
+function ns.RefreshUI()
+  if not win or not win:IsShown() then return end
+  local wait = HaulDB and HaulDB.refreshThrottle or 0.1
+  if wait <= 0 then refreshLast = GetTime(); return DoRefreshUI() end
+  local now, due = GetTime(), refreshLast + wait
+  if now >= due then
+    refreshLast = now
+    return DoRefreshUI()
+  end
+  if refreshPending then return end   -- a trailing pass is already scheduled; this event rides along on it
+  refreshPending = true
+  C_Timer.After(due - now, function()
+    refreshPending = false
+    refreshLast = GetTime()
+    DoRefreshUI()
+  end)
 end
 
 -------------------------------------------------------------------- build ----
@@ -1634,6 +2055,15 @@ function ns.BuildUI()
   win.btnTrack:SetPoint("LEFT", bReset, "RIGHT", 4, 0)
   local bSave = mk("Save", function() ns.SaveSession() end, 56)
   bSave:SetPoint("LEFT", win.btnTrack, "RIGHT", 4, 0)
+  win.btnSave = bSave                                       -- ns.UpdateSaveEnabled() gates this on ns.SafeNow()
+  bSave:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText("Save: sync to disk (reload)")
+    GameTooltip:AddLine("A reload only works from a click when it's safe, so this is disabled while you're casting, looting, or in combat. It enables the moment you're clear.", 0.9, 0.9, 0.9, true)
+    GameTooltip:Show()
+  end)
+  bSave:SetScript("OnLeave", GameTooltip_Hide)
+  if ns.UpdateSaveEnabled then ns.UpdateSaveEnabled() end   -- initial enabled state at build time
   local bOpt = mk("Options", function() ns.ToggleOptions() end, 64)
   bOpt:SetPoint("LEFT", bSave, "RIGHT", 4, 0)
 

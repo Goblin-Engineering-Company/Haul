@@ -1,6 +1,6 @@
 -- GECData-1.0 — the token data-provider standard: consume LDB feeds (passthrough + protocol +
 -- the typed-token convention) and produce them. Renders typed values through GECTemplate.
-local MAJOR, MINOR = "GECData-1.0", 2
+local MAJOR, MINOR = "GECData-1.0", 3
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end
 local LDB = LibStub and LibStub:GetLibrary("LibDataBroker-1.1", true)
@@ -129,7 +129,10 @@ function lib.RegisterConsumer(Tpl)
           -- typed render → (text, selfColored); wrap the text in the feed's hot-span (if it has
           -- handlers) so {slug.token} is clickable too, preserving the selfColored flag.
           local text, selfColored = Tpl.types[typ](val, nil, lib)
-          return lib.Wrap(slug, text), selfColored
+          -- 3rd return = the feed's DEFAULT color for this token (if any), so {slug.token} shows its
+          -- category color automatically while {slug.token:color} still overrides it (see GECTemplate).
+          local defcol = feed.tokenColors and feed.tokenColors[sub]
+          return lib.Wrap(slug, text), selfColored, defcol
         end
       end
       -- protocol fields (plain LDB) — known field with a nil value ⇒ "" (parity: Broker.lua:126), not literal.

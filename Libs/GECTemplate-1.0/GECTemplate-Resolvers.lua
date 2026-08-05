@@ -465,6 +465,14 @@ end)
 -- on the lib singleton so multiple embedders share it); consumers pick up the cached value on their next
 -- render tick. Lifted from Haul/Token.lua so it's reusable by any addon (watcher, demo, Haul itself).
 local function wowtokenState()
+  -- GECWowToken-1.0 (when embedded — Haul/Gadgets) OWNS the token: polling + the REAL windowed trend +
+  -- stats. Read live from it so {wowtoken.*} matches Haul and gets the windowed trend, not delta-since-last.
+  local wt = LibStub and LibStub:GetLibrary("GECWowToken-1.0", true)
+  if wt and wt.GetPrice then
+    local tr = wt.GetTrend and wt.GetTrend()
+    return { price = wt.GetPrice(), trend = (tr and tr.dir) or "flat", _lib = wt }
+  end
+  -- Fallback: an addon that doesn't embed the token lib (e.g. SBF) keeps the old self-polling state below.
   if not Tpl._wowtoken then
     local st = { price = nil, trend = "flat" }
     Tpl._wowtoken = st
@@ -501,18 +509,13 @@ local function wowtokenState()
   return Tpl._wowtoken
 end
 
--- Trend display — tinted texture arrows + a colored word, self-colored so a template's base
--- color can't recolor them. Byte-identical to Haul/Window.lua's TREND_DISPLAY (and Megaphone's):
--- the default font has no ▲/▼ glyph, so we use the Blizzard arrow textures. yOffset is negative=down
--- (per CreateTextureMarkup). The two textures are NOT symmetric: Arrow-Down-Up's chevron sits higher in
--- its 32×32 canvas than Arrow-Up-Up's, so at the same offset the DOWN arrow rides up off a thin bar — it
--- needs an extra drop. 12px (not 14) so it fits a short gadget bar without poking out the top.
--- NOTE: these offsets are eyeball-tuned; nudge yOffset (5th field) if a bar font makes them sit off-center.
-local TR_UP   = "|TInterface\\Buttons\\Arrow-Up-Up:12:12:0:-2:32:32:0:32:0:32:30:255:0|t"
-local TR_DOWN = "|TInterface\\Buttons\\Arrow-Down-Up:12:12:0:-6:32:32:0:32:0:32:255:96:96|t"
+-- Trend display — just the colored WORD (self-colored so a template's base color can't recolor it). Matches
+-- GECWowToken's TrendDisplay; this local copy is only the fallback for an addon that doesn't embed the token
+-- lib (e.g. SBF). No arrow graphic: a texture can't be centred+sized across the different fonts these render
+-- in, so it was dropped in favor of the word.
 local TREND_DISPLAY = {
-  up   = TR_UP   .. " |cff1eff00up|r",
-  down = TR_DOWN .. " |cffff6060down|r",
+  up   = "|cff1eff00up|r",
+  down = "|cffff6060down|r",
   flat = "|cff808080flat|r",
 }
 
@@ -526,7 +529,10 @@ Tpl.RegisterType("wowtoken", function(v, facet, ctx)
   local st = wowtokenState()
   facet = facet or "price"
   if facet == "trend" then
-    return TREND_DISPLAY[st.trend or "flat"] or "-", true        -- self-colored (arrows + words)
+    -- Prefer the ONE shared arrow display in GECWowToken-1.0 (so Haul + Gadgets match after the centring
+    -- fix); fall back to the local TREND_DISPLAY for an addon that doesn't embed the token lib (e.g. SBF).
+    local wt = LibStub and LibStub:GetLibrary("GECWowToken-1.0", true)
+    return (wt and wt.TrendDisplay and wt.TrendDisplay(st.trend)) or (TREND_DISPLAY[st.trend or "flat"] or "-"), true
   elseif facet == "percent" then
     return "-", false                                            -- session %: injected later
   elseif facet == "pct" then
@@ -537,6 +543,13 @@ Tpl.RegisterType("wowtoken", function(v, facet, ctx)
     -- price family: price / value / short → money SHORT; full → money FULL. "-" until known.
     if not (st.price and st.price > 0) then return "-", false end
     return Tpl.types.money(st.price, (facet == "full") and "full" or "short", ctx)
+  elseif facet == "high" or facet == "low" or facet == "avg" then
+    -- all-time stats (money SHORT) from the lib; "-" if the lib isn't embedded or has no history yet.
+    local s = st._lib and st._lib.GetStats and st._lib.GetStats()
+    local price = s and ((facet == "high" and s.high and s.high.price)
+      or (facet == "low" and s.low and s.low.price) or (facet == "avg" and s.avg)) or nil
+    if not (price and price > 0) then return "-", false end
+    return Tpl.types.money(price, "short", ctx)
   end
   return nil   -- unrecognized facet → engine renders the literal (typo aid)
 end)

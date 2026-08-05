@@ -1,0 +1,23 @@
+# BigWigs packager config. This repo is already a fully-stripped, vendored-libs
+# build (produced by publish-public.sh), so the packager only needs to zip + upload.
+package-as: Haul
+
+# We hand-manage the .toc and bundle libraries under Libs/ ourselves.
+enable-nolib-creation: no
+enable-toc-creation: no
+
+# release-public.sh writes the curated public release notes to CHANGELOG.md before
+# it tags, so CurseForge/WoWInterface show the SAME notes as the GitHub release and
+# the goblineng.co changelog. wowi-convert-changelog (on by default) renders it to
+# BBCode for WoWInterface; CurseForge/Wago take the markdown as-is.
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+# Keep release/repo infrastructure out of the shipped addon zip.
+ignore:
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - DESCRIPTION.md
+  - DESCRIPTION.bbcode

@@ -19,7 +19,7 @@
 --
 -- EMBED-SYNC: copied verbatim into addons/_libs/, addons/SBF/Libs/, addons/Haul/Libs/. A lib edit must propagate
 -- to ALL copies — bump MINOR so the newest copy wins via LibStub until the others sync.
-local MAJOR, MINOR = "GECLoot-1.0", 10  -- 10: fish window is one-per-reel-in — a later instant-open chest in the tail is not fish
+local MAJOR, MINOR = "GECLoot-1.0", 14  -- 14: in-window source deferral — re-resolve src=nil slots each auto-loot tick + on LOOT_OPENED so the callback carries the REAL objID (GetLootSourceInfo lags window-open); fishing-tail fallback (13) covers the never-resolves case
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end
 
@@ -64,11 +64,28 @@ lib.CONTAINER_WINDOW = lib.CONTAINER_WINDOW or 2
 local FISHING_SPELLS   = { [131474] = true, [131476] = true }
 local SPELL_PICKPOCKET = 921
 local SPELL_OPENING    = 3365
+-- "Opening" has MANY ranks/variants — 3365 is only rank 1. Clicking a world chest fires whichever applies
+-- (field data: an instant-open Midnight chest cast 6247), and knowing ONLY 3365 let the chest fall through to
+-- the fishing-tail fallback and get mis-tagged "fish" (then logged as a catch). Match the whole family: a
+-- known-id fast path PLUS a name compare to base "Opening" (locale-proof), mirroring isFishingSpell.
+local OPENING_SPELLS   = { [3365] = true, [6247] = true, [6478] = true, [6479] = true, [11792] = true,
+                           [11793] = true, [21651] = true, [22810] = true }
+-- KNOWN non-fishing world chests by GameObject objID. Some are INSTANT-open (no recognizable cast), so the
+-- Opening-spell check alone can't catch them — and the fishing tail would otherwise claim their GameObject
+-- loot as "fish" (a false catch). Fishing loot has its OWN stable objID (e.g. 385541); these are different
+-- objects. Extend as more are found (field data / crowdsourced catalog). A listed id is NEVER a fish.
+local KNOWN_CHEST_OBJECTS = { [540505] = true, [617089] = true }
 local function spellName(id) return id and C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(id) or nil end
 local function isFishingSpell(id)
   if not id then return false end
   if FISHING_SPELLS[id] then return true end
   local base = spellName(131474)          -- localized "Fishing" (cached would be nicer, but this is cheap + rare)
+  return (base and spellName(id) == base) or false
+end
+local function isOpeningSpell(id)
+  if not id then return false end
+  if OPENING_SPELLS[id] then return true end
+  local base = spellName(SPELL_OPENING)   -- localized "Opening" (base rank); matches every rank by name
   return (base and spellName(id) == base) or false
 end
 
@@ -143,6 +160,10 @@ local function freshCast(spellID)
   local c = lib._lastCast
   return c and c.spell == spellID and (GetTime() - c.t) < lib.CONTEXT_WINDOW
 end
+local function freshOpeningCast()   -- last cast was ANY Opening spell (chest / lockbox) within the window
+  local c = lib._lastCast
+  return c and isOpeningSpell(c.spell) and (GetTime() - c.t) < lib.CONTEXT_WINDOW
+end
 local function freshGather()
   local g = lib._gather
   if g and (GetTime() - g.t) < lib.CONTEXT_WINDOW then return g end
@@ -159,6 +180,17 @@ local function fishingNow()
     or (lib._lastCast and isFishingSpell(lib._lastCast.spell) and (GetTime() - lib._lastCast.t) < lib.CONTEXT_WINDOW)
     or false
 end
+-- Same tail window as fishingNow(), but WITHOUT the _fishConsumed veto — used only to CLASSIFY loot as fish.
+-- The consumed flag exists to stop an instant-open chest in the tail from being tagged fish; but real chests
+-- are now identified by their own objIDs (KNOWN_CHEST_OBJECTS, checked first), so the veto no longer has a job
+-- there — it was only downgrading the reeled-in fish (the bobber, whatever its objID) to nil/chest when a prior
+-- window had already flipped _fishConsumed. Loot pulled up during YOUR fishing tail is the fish; classify it so.
+local function inFishTail()
+  if lib._fishActive then return true end
+  return (lib._fishUntil and (GetTime() - lib._fishUntil) < lib.FISH_TAIL)
+    or (lib._lastCast and isFishingSpell(lib._lastCast.spell) and (GetTime() - lib._lastCast.t) < lib.CONTEXT_WINDOW)
+    or false
+end
 
 -- Classify a loot SLOT's source into a `src` descriptor { t, guid, npcID, objID, node } (nil if unattributable).
 -- Reads the slot's source GUID + the recent action context. Money slots have no item link but DO carry the
@@ -166,7 +198,10 @@ end
 local function classifyLootSlot(slot)
   local guid = GetLootSourceInfo and (GetLootSourceInfo(slot))
   if not guid then
-    if fishingNow() then return { t = "fish" } end   -- fished loot sometimes has no GUID
+    -- Fished loot sometimes has NO source GUID (or GetLootSourceInfo hasn't populated it yet this frame). In a
+    -- fishing tail that's the reeled-in fish — tolerate it even after _fishConsumed (a guid-less slot can't be a
+    -- chest; chests carry a GameObject GUID). This is the "caught in Haul but no loot source" fix.
+    if inFishTail() then return { t = "fish" } end
     return nil
   end
   local kind, id = parseGUID(guid)
@@ -174,6 +209,10 @@ local function classifyLootSlot(slot)
     if freshCast(SPELL_PICKPOCKET) then return { t = "pickpocket", guid = guid, npcID = id } end
     return { t = "kill", guid = guid, npcID = id }
   elseif kind == "GameObject" then
+    -- KNOWN world chest by objID = NEVER a fish, no matter the channel/tail/cast state. This is the reliable
+    -- signal for instant-open chests that fire no recognizable cast (their objID is the only sure tell). Wins
+    -- over everything below.
+    if KNOWN_CHEST_OBJECTS[id] then return { t = "chest", objID = id } end
     -- While the fishing channel is LIVE, GameObject loot is unambiguously the reeled-in fish. Once the
     -- channel stops we're in the FISH_TAIL — a several-second grace where fished loot still arrives, BUT a
     -- chest/node opened in that grace would otherwise be mis-tagged "fish". So in the tail an EXPLICIT open
@@ -182,15 +221,16 @@ local function classifyLootSlot(slot)
     if lib._fishActive then return { t = "fish", objID = id } end     -- channel live = definitely a fish
     local g = freshGather()
     if g then return { t = g.skill or "gather", objID = id, node = g.node } end
-    if freshCast(SPELL_OPENING) then return { t = "chest", objID = id } end   -- explicit Opening cast = a chest
-    if fishingNow() then return { t = "fish", objID = id } end        -- otherwise the fishing tail owns it
-    return { t = "chest", objID = id }                                -- world object, no cast context
+    if freshOpeningCast() then return { t = "chest", objID = id } end   -- explicit Opening cast (any rank) = a chest
+    if inFishTail() then return { t = "fish", objID = id } end        -- otherwise the fishing tail owns it (the bobber)
+    return { t = "chest", objID = id }                                -- world object, no fishing/gather/opening context
   elseif kind == "Item" then
     return { t = "container", objID = id }                            -- opened lockbox / container item
   end
   return { t = "unknown", guid = guid }
 end
 lib.ClassifyLootSlot = classifyLootSlot   -- exposed for consumers / tests
+lib.KnownChests = KNOWN_CHEST_OBJECTS     -- [objID]=true — consumers scope chest tracking to this exact set
 
 -- Build a canonical loot-entry table from a GECLoot `info` record (as returned by the LOOT_ITEM callback).
 -- Pure function — no WoW API calls, no side effects, nil-safe. Consumers append `val` themselves after pricing.
@@ -286,6 +326,18 @@ local function processTick()
   if not lib._active then stopTicker(); return end
   local num = GetNumLootItems() or 0
   if num == 0 then stopTicker(); return end
+  -- In-window source DEFERRAL: GetLootSourceInfo can lag the window-open by a frame or two, so a slot cached
+  -- at LOOT_READY may still hold src=nil. Re-resolve those every tick — right up until the slot is looted —
+  -- so the callback fires with the REAL objID whenever the game makes it available in time. This is the loot
+  -- analogue of Haul's pricing deferral, but BOUNDED: the loot source is window-scoped (once the slot is
+  -- looted + the window closes it's gone — no backfill event exists), so this in-window retry is the last
+  -- chance to capture it. classifyLootSlot's fishing-tail fallback still covers the slot that never resolves.
+  if lib._slot then
+    for s = 1, num do
+      local cached = lib._slot[s]
+      if cached and cached.src == nil then cached.src = classifyLootSlot(s) end
+    end
+  end
   local skip = lib._skipSlots
   local pendings
   for slot = num, 1, -1 do
@@ -327,7 +379,18 @@ end
 local function onLootReady()
   local num = GetNumLootItems() or 0
   if num == 0 then return end
-  if lib._lastNum == num then return end   -- de-dupe the LOOT_READY / LOOT_OPENED double-fire for one window
+  if lib._lastNum == num then
+    -- De-dupe the LOOT_READY / LOOT_OPENED double-fire — BUT the first fire can land before GetLootSourceInfo
+    -- has populated a slot's GUID, freezing src=nil. The re-fire (GUID now present) is our chance to upgrade
+    -- those: re-classify only the slots still sitting at nil, never overwriting one that already resolved.
+    if lib._slot then
+      for slot = 1, num do
+        local cached = lib._slot[slot]
+        if cached and cached.src == nil then cached.src = classifyLootSlot(slot) end
+      end
+    end
+    return
+  end
   lib._lastNum = num
   lib._slot = {}
   for slot = 1, num do

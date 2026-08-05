@@ -1,7 +1,7 @@
 -- GECTemplate-1.0 — shared {token} text-render engine for Goblin Engineering Company WoW addons.
 -- Lifted from Haul ns.RenderTemplate; standalone LibStub library with no WoW-API dependency.
 -- Grammar: {token}  {token.facet}  {token:color}  {token(arg)}  {"literal"}  {br}
-local MAJOR, MINOR = "GECTemplate-1.0", 7
+local MAJOR, MINOR = "GECTemplate-1.0", 14
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end   -- a newer copy is already loaded
 
@@ -29,6 +29,18 @@ lib.NAMED_COLORS = {
   white  = "ffffff", red    = "ff6060", green  = "1eff00", blue   = "66ccff",
   gold   = "ffd100", yellow = "ffd100", purple = "a335ee", gray   = "808080",
   grey   = "808080", orange = "eda55f", teal   = "45c4a0",
+  seafoam = "7fe0c0", sky    = "8ad4ff", rose   = "ff8a8a", lilac  = "c7a2ff",
+  pink   = "e874c4",
+  -- SEMANTIC category colors — mirror of GECTheme-1.0 NAMED_COLORS so {token:xp} / {token:rep} etc.
+  -- resolve the same everywhere. xp=green, rep=pink, currency=blue, kill=red, mail/coin=gold,
+  -- vendor=orange, skill=lilac.
+  xp = "1eff00", rep = "e874c4", currency = "66ccff", kill = "ff6060",
+  mail = "ffd100", coin = "ffd100", vendor = "ff9933", skill = "c7a2ff",
+  -- Log-KIND colors (mirror of GECTheme) — SBF's per-outcome scheme, one source for both logs.
+  caught = "33ff33", expired = "aaaaaa", missed = "ffaa44", interrupt = "ff6060",
+  castfail = "ff8844", action = "7fb0e6", buff = "ffcf40", gathered = "c0d860",
+  start = "45c4a0", stop = "ff6060", pause = "ffaa44", resume = "45c4a0",
+  fold = "c080ff", include = "808080", exclude = "a0a0a0",
 }
 
 -- Resolve a color keyword or raw 6-hex string to a 6-hex value, or nil.
@@ -138,12 +150,14 @@ function Renderer:Render(template, data, base)
     --    Parameterized (arg) tokens are never routed through the fallback chain — they go literal.
     if not resolver and (arg ~= nil or v == nil) then
       if arg == nil then
-        local rtext, rself = runResolvers(name)
+        local rtext, rself, rcolor = runResolvers(name)
         if rtext ~= nil then
           if rself then return rtext end
-          -- colorable: apply explicit :color or token default color, then return
+          -- color precedence: explicit :color > the resolver/feed's DEFAULT color (so a feed token like
+          -- {haul.xp} shows its category color automatically, yet {haul.xp:blue} still overrides) > spec default.
           local defColor = type(entry) == "table" and entry.color or nil
           local hex = resolveColor(colraw, NAMED)
+                      or (rcolor and (NAMED[rcolor:lower()] or resolveColor(rcolor, NAMED)))
                       or (defColor and (NAMED[defColor:lower()] or resolveColor(defColor, NAMED)))
           if hex then return "|cff" .. hex .. rtext .. "|r" end
           return rtext
@@ -251,8 +265,8 @@ end
 
 runResolvers = function(name)
   for i = 1, #lib.resolvers do
-    local text, selfColored = lib.resolvers[i](name)
-    if text ~= nil then return text, selfColored end
+    local text, selfColored, defColor = lib.resolvers[i](name)
+    if text ~= nil then return text, selfColored, defColor end
   end
 end
 
