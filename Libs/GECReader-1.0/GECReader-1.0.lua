@@ -1,7 +1,7 @@
 -- GECReader-1.0 — the single getter layer for GEC addons: the ONLY code that touches Blizzard APIs.
 -- Current.* = live/transient reads; Resolve.* = stable id-keyed reads. The raw WoW calls live in the
 -- injectable _adapter (mocked in tests); the facade below does the assembly + profiling + secret handling.
-local MAJOR, MINOR = "GECReader-1.0", 11
+local MAJOR, MINOR = "GECReader-1.0", 12
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end
 GECReader = lib
@@ -328,15 +328,26 @@ if C_Map or C_UnitAuras or GetBuildInfo then
   -- HELPFUL aura scan. Raw fields passed through (name may be a secret value in-game); the facade
   -- (Current.buffs) flags/keys it. NOTE: this method is absent from the plan's Task 6 block; added
   -- because Current.buffs() (Task 5) requires it or buffs are always empty in-game.
+  -- 12.1 SECRET-AURA HARD ERROR (MINOR 12). In 12.0 an index walk RETURNED secret values and the
+  -- facade filtered them (lib._isSecret). In 12.1 the CALL ITSELF throws for a tainted addon while
+  -- auras are secret — combat, encounters, M+, PvP:
+  --     GetAuraDataByIndex(): Auras cannot be accessed when secret while tainted by '<Addon>'
+  -- Index/slot/instanceID access is the unsafe family; spell-ID / spell-name lookups still work.
+  -- There is NO API to test secrecy first (no AreAurasSecret), so the call is its own probe: pcall
+  -- it and, on the secret-aura error, report NO readable auras for this frame. Returning {} rather
+  -- than a partial list is deliberate — a half-read aura set would read as "buff is down" for the
+  -- unread half and could drive a caller to re-apply a buff that is actually up.
+  -- Cost while secret: buffs read as absent (aura-effect slots hold). Restoring in-combat reads
+  -- needs the by-spellID/by-name migration (GetPlayerAuraBySpellID / GetAuraDataBySpellName).
   function a.auras()
     local list = {}
-    if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-      for i = 1, 60 do
-        local d = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
-        if not d then break end
-        list[#list + 1] = { name = d.name, spellId = d.spellId, icon = d.icon,
-                            duration = d.duration, expirationTime = d.expirationTime, applications = d.applications }
-      end
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDataByIndex) then return list end
+    for i = 1, 60 do
+      local ok, d = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, "HELPFUL")
+      if not ok then return {} end   -- auras are secret this frame: no readable aura data at all
+      if not d then break end
+      list[#list + 1] = { name = d.name, spellId = d.spellId, icon = d.icon,
+                          duration = d.duration, expirationTime = d.expirationTime, applications = d.applications }
     end
     return list
   end

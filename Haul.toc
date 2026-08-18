@@ -1,9 +1,9 @@
-## Interface: 120007
+## Interface: 120100
 ## Title: Haul
 ## Notes: Loot / gold-per-hour tracker. Per-item exclude-from-gold, collapsible bar, reload-to-sync.
 ## Category: GEC
 ## Author: Goblin Engineering Company
-## Version: 2026.08.04.1
+## Version: 2026.08.17.1
 ## X-GEC-Channel: public
 ## X-WoWI-ID: 27172
 ## X-Curse-Project-ID: 1625852
