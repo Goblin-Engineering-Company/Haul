@@ -273,9 +273,22 @@ local function Build()
     verFS:SetText("Version " .. tostring(ver) .. (Haul.ChannelBadge and Haul.ChannelBadge() or ""))   -- badge dev/prerelease/local
     Theme.Font(verFS, "textDim")
 
+    -- Report a bug — deliberately at the TOP of About, exactly like SBF: when something is wrong this is the
+    -- page people open first, and a report is only worth having if it's the easiest thing on it to find. This
+    -- is the ONLY in-UI route for a shipped user (the Dev tab is stripped). Opens its own self-contained copy
+    -- window (Report.lua) with no dependency on any other addon.
+    local bug = CreateFrame("Button", nil, pAbout, "UIPanelButtonTemplate")
+    bug:SetSize(150, 24); bug:SetPoint("TOP", verFS, "BOTTOM", 0, -10)
+    bug:SetText("Report a bug"); Theme.Button(bug)
+    bug:SetScript("OnClick", function() if Haul.ShowBugReport then Haul.ShowBugReport() end end)
+    AttachTip(bug, "Report a bug",
+      "Opens a copyable summary of your setup - versions, settings, price source, session and zone state - "
+      .. "plus the health of the saved data. Paste it into your report so we can reproduce it. "
+      .. "No character name, realm or guild is included.")
+
     -- tagline — brand-gold (e8c679), matching SBF's About/welcome styling.
     local tag = pAbout:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    tag:SetPoint("TOP", verFS, "BOTTOM", 0, -14)
+    tag:SetPoint("TOP", bug, "BOTTOM", 0, -14)
     tag:SetText("|cffe8c679Know exactly what every session is worth.|r")
 
     -- the "does it all" one-liner: what Haul tracks and shows for you.
@@ -336,7 +349,7 @@ local function Build()
       banner:SetSize(bw, bw / BANNER_ASPECT)
       local dw = math.min(BANNER_MAX_W, sw - 60)
       div:SetWidth(dw); licDiv:SetWidth(dw)                    -- both dividers track the window width
-      pAbout:SetHeight(BANNER_TOP + banner:GetHeight() + 360)  -- fixed stack below (desc + invite + url + license)
+      pAbout:SetHeight(BANNER_TOP + banner:GetHeight() + 394)  -- fixed stack below (bug button + desc + invite + url + license)
       if sf.RefreshScrollBar then sf.RefreshScrollBar() end
     end
     pAbout:HookScript("OnSizeChanged", layoutAbout)

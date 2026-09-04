@@ -148,6 +148,7 @@ local DB_DEFAULTS = {
     groupOpen = {},      -- per-bucket accordion open state (bound/gray/excluded -> bool), seeded from mode
   },
 }
+ns.Defaults = DB_DEFAULTS   -- read-only reference for Report.lua (the "CHANGED from default" line can't drift)
 
 local function ApplyDefaults(dst, defaults)
   for k, v in pairs(defaults) do
@@ -2886,6 +2887,7 @@ local function InInstanceNow()
   end
   return false, instType
 end
+ns.InInstanceNow = InInstanceNow   -- Report.lua reads the SAME predicate the triggers use
 -- Is scenario-system content active RIGHT NOW (regardless of the opt-in)? Used only for the dev "you entered a
 -- scenario" identification print, so false positives are visible even when scenario-sidelining is off.
 function ns._ScenarioActive()
@@ -3264,8 +3266,14 @@ end
 ------------------------------------------------------------------ slash cmd --
 SLASH_HAUL1 = "/haul"
 SlashCmdList.HAUL = function(msg)
-  msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  local raw = (msg or ""):gsub("^%s+", ""):gsub("%s+$", "")   -- original case: the bug-report note is included verbatim
+  msg = raw:lower()
   if msg == "new" or msg == "reset" then ns.Reset()   -- "new" is the public name; "reset" kept as a quiet alias
+  elseif msg == "bug" or msg == "bugreport" or msg:match("^bug%s") or msg:match("^bugreport%s") then
+    -- PUBLIC: copyable, PII-free diagnostic blob (Report.lua). MUST stay outside every @strip block: this and the
+    -- About-tab button are the ONLY routes a shipped user has to a report. Everything after the word is the
+    -- reporter's own description, included verbatim.
+    if Haul.ShowBugReport then Haul.ShowBugReport(raw:match("^%S+%s+(.+)$")) end
   elseif msg == "save" then ns.SaveSession()
   elseif msg == "toggle" then ns.ToggleTracking()
   elseif msg == "flush" then Haul_Flush()
@@ -3278,6 +3286,22 @@ SlashCmdList.HAUL = function(msg)
     if ns.ShowPorter then ns.ShowPorter() end
   elseif msg == "show" or msg == "" then Haul_ToggleWindow()
   else
-    ns.Print("commands: show, new, save, toggle, flush, price <src>, config, settings")
+    ns.Print("commands: show, new, save, toggle, flush, price <src>, config, settings, bug [what happened]")
   end
 end
+
+-- ============================ AddOns compartment (the minimap's addon list) ============================
+-- Blizzard only lists an addon in the minimap's AddOns menu if its .toc names a global handler here, which
+-- is why none of these appeared. MUST be real globals: the compartment resolves them by name from
+-- Blizzard's own code, so a file-local never binds. Routed through the slash command rather than an
+-- internal function so this stays correct if the window plumbing is refactored.
+function Haul_OnAddonCompartmentClick()
+  if SlashCmdList and SlashCmdList.HAUL then SlashCmdList.HAUL("") end
+end
+function Haul_OnAddonCompartmentEnter(_, menuButton)
+  GameTooltip:SetOwner(menuButton or UIParent, "ANCHOR_LEFT")
+  GameTooltip:SetText("Haul")
+  GameTooltip:AddLine("Click to open.", 0.9, 0.9, 0.9)
+  GameTooltip:Show()
+end
+function Haul_OnAddonCompartmentLeave() GameTooltip:Hide() end

@@ -3,13 +3,17 @@
 ## Notes: Loot / gold-per-hour tracker. Per-item exclude-from-gold, collapsible bar, reload-to-sync.
 ## Category: GEC
 ## Author: Goblin Engineering Company
-## Version: 2026.08.17.1
+## Version: 2026.09.03.1
 ## X-GEC-Channel: public
 ## X-WoWI-ID: 27172
 ## X-Curse-Project-ID: 1625852
 ## SavedVariables: HaulDB, HaulState, HaulData, GECStoreDB, GECWowTokenDB
 ## OptionalDeps: TradeSkillMaster, Auctionator
 ## X-Category: Inventory
+## IconTexture: Interface\Icons\INV_Misc_Bag_10
+## AddonCompartmentFunc: Haul_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: Haul_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: Haul_OnAddonCompartmentLeave
 
 CombatLogInit.lua
 
@@ -44,6 +48,7 @@ Token.lua
 Capture.lua
 Flush.lua
 Options.lua
+Report.lua
 ImportExport.lua
 Sessions.lua
 Window.lua

@@ -304,6 +304,7 @@ end
 -- saved-session snapshot. The caller sets it before building (BuildEntries for live; BuildSessionEntries
 -- for a snapshot). Builds are synchronous, so there's no re-entrancy.
 local RCTX = {}
+local statsFrame, statsCache = -1, nil   -- this frame's ComputeStats result (set by BuildFields, reused by BuildEntries)
 local function PctCol(pct)
   if RCTX.colPct and pct then return "|cff808080" .. string.format("%.1f%%", pct) .. "|r" end
   return nil
@@ -1057,7 +1058,8 @@ local function BuildEntries()
   -- LIVE render context: clickable items mutate the live session; live group-open + columns.
   RCTX = { colPct = HaulDB.window.colPct, colSrc = HaulDB.window.colSrc, itemClick = ItemClick,
            devMeta = (Haul.IsDev() and HaulDB.devTooltip) and true or false,
-           go = HaulDB.window.groupOpen, onToggle = ToggleGroup }
+           go = HaulDB.window.groupOpen, onToggle = ToggleGroup,
+           stats = (statsFrame == GetTime()) and statsCache or nil }   -- reuse this frame's ComputeStats (see BuildFields)
   local cat = HaulDB.window.category or "loot"
   if cat == "all" then return BuildAllEntries() end
   if cat == "mail" then return BuildMailCollectionEntries() end
@@ -1182,8 +1184,14 @@ end
 
 -------------------------------------------------------------- template render --
 -- Build the token table once per refresh; shared by the main bar AND watchers.
+-- ONE ComputeStats per pass. BuildFields and BuildEntries each used to call it, and ComputeStats is a full
+-- replay of the session log plus a price lookup per item — so every refresh paid for the same replay twice.
+-- GetTime() is frame-constant in WoW, so "same GetTime()" == "same frame" == nothing can have changed
+-- in between; BuildEntries reuses these stats when they were computed this frame and recomputes otherwise.
+-- (statsFrame/statsCache are declared above RCTX, ahead of BuildEntries.)
 function ns.BuildFields()
   local st = ns.ComputeStats()
+  statsFrame, statsCache = GetTime(), st
   local src = ns.SourceLabel and ns.SourceLabel() or HaulDB.priceSource
   local tp = ns.TokenPrice and ns.TokenPrice()
   local clock = SecondsToClock or function(s) return string.format("%d:%02d", math.floor(s / 60), s % 60) end
@@ -1735,8 +1743,37 @@ function ns.UpdateSaveEnabled()
 end
 
 ------------------------------------------------------------------ refresh ----
-local function DoRefreshUI()
+-- What the LIST depends on, as one string: the session identity, every per-category log length, the coin,
+-- and the active category. Time is deliberately NOT in it (row values never depend on elapsed). Every
+-- state mutation that changes rows in any other way (exclude/keep clicks, group toggles, sort/mode/column
+-- options, category rotation) already calls ns.RefreshUI itself, and those are FULL passes — the key only
+-- gates the once-a-second TICK, so a tick can never be the pass that misses a change.
+local function ListKey()
+  local s = ns.session
+  if not s then return "none" end
+  return table.concat({ tostring(s.sid or s), #(s.log or {}), #(s.repLog or {}), #(s.currencyLog or {}),
+    #(s.professionsLog or {}), #(s.xpLog or {}), #(s.xpOtherLog or {}), #(s.mailGoldLog or {}),
+    tostring(s.killCount or 0), tostring(s.gold or 0), tostring(HaulDB.window.category or "loot") }, "|")
+end
+local lastListKey
+-- Cheap per-tick sync (notify line expiry + button/tint state) — the only things that can change with no
+-- event while tracking is PAUSED. Everything else in the pass is a function of the log, which is static.
+local function SyncChrome()
+  local note = ""
+  if ns._notifyMsg and GetTime() < (ns._notifyUntil or 0) then note = ns._notifyMsg end
+  win.notify:SetText(note)
+  if ns.ApplyTrackingTint then ns.ApplyTrackingTint() end
+  win.btnTrack:SetText(ns.IsTracking() and "Pause" or "Resume")
+  if ns.UpdatePlayButton then ns.UpdatePlayButton() end
+  if ns.UpdateSaveEnabled then ns.UpdateSaveEnabled() end   -- keep Save's enabled state fresh each refresh (safety net for the event watcher)
+end
+
+local function DoRefreshUI(tick)
   if not win or not win:IsShown() then return end   -- hidden window: skip the whole (expensive) BuildFields/ComputeStats pass
+  -- TICK while PAUSED: the timer is frozen and the log can't move without an event (which does its own full
+  -- pass), so the replay would rebuild byte-identical output. This was ~all of Haul's idle CPU: two full
+  -- log replays + a complete list re-layout every second, for a window that could not have changed.
+  if tick and not ns.IsTracking() then SyncChrome(); return end
   local fields = ns.BuildFields()
   win.barText:SetText(ns.RenderTemplate(
     HaulDB.headerTemplate or "{time}   {haul}   {perhour}/hr", fields))
@@ -1746,20 +1783,19 @@ local function DoRefreshUI()
   win.statText:SetText(ns.RenderTemplate(HaulDB.detailTemplate or "{haul.full}", fields))
   UpdateStatsHeight()   -- protect the bottom row from a tall/wrapping detail template
 
-  -- notification line: a transient message (last looted item / saved / reset).
-  local note = ""
-  if ns._notifyMsg and GetTime() < (ns._notifyUntil or 0) then
-    note = ns._notifyMsg
-  end
-  win.notify:SetText(note)
-  -- track button label + bar pause/play icon + paused/active tint — ALL read IsTracking() here, so the
-  -- background can never desync from the buttons (this is the single per-refresh UI sync every path hits).
-  if ns.ApplyTrackingTint then ns.ApplyTrackingTint() end
-  win.btnTrack:SetText(ns.IsTracking() and "Pause" or "Resume")
-  if ns.UpdatePlayButton then ns.UpdatePlayButton() end
-  if ns.UpdateSaveEnabled then ns.UpdateSaveEnabled() end   -- keep Save's enabled state fresh each refresh (safety net for the event watcher)
+  -- notification line + track button label + bar pause/play icon + paused/active tint — ALL read
+  -- IsTracking() in SyncChrome, so the background can never desync from the buttons (the single per-refresh
+  -- UI sync every path hits).
+  SyncChrome()
   if win.list:IsShown() and win.accordion then
-    win.accordion:SetEntries(BuildEntries())   -- builds for the active (category, view)
+    -- TICK while RUNNING: the header/detail text above needed the fresh pass (timer + per-hour move every
+    -- second), but the list rows don't depend on time — re-laying out every row (ClearAllPoints/SetPoint/
+    -- GetStringWidth per column per row) is only worth it when the session content actually changed.
+    local key = ListKey()
+    if not tick or key ~= lastListKey then
+      lastListKey = key
+      win.accordion:SetEntries(BuildEntries())   -- builds for the active (category, view)
+    end
   end
 end
 
@@ -1771,16 +1807,19 @@ end
 -- and anything arriving inside the window is collapsed into ONE trailing pass at the end of it.
 -- Set HaulDB.refreshThrottle = 0 to restore the old refresh-on-every-event behavior.
 local refreshLast, refreshPending = 0, false
-function ns.RefreshUI()
+-- `tick` = the once-a-second live ticker (not an event). A tick pass is allowed to skip work that can't have
+-- changed (see DoRefreshUI); an event pass never skips. A tick that lands inside the throttle window simply
+-- rides along on the pending EVENT pass (which is a superset), so it's dropped rather than scheduled.
+function ns.RefreshUI(tick)
   if not win or not win:IsShown() then return end
   local wait = HaulDB and HaulDB.refreshThrottle or 0.1
-  if wait <= 0 then refreshLast = GetTime(); return DoRefreshUI() end
+  if wait <= 0 then refreshLast = GetTime(); return DoRefreshUI(tick) end
   local now, due = GetTime(), refreshLast + wait
   if now >= due then
     refreshLast = now
-    return DoRefreshUI()
+    return DoRefreshUI(tick)
   end
-  if refreshPending then return end   -- a trailing pass is already scheduled; this event rides along on it
+  if refreshPending or tick then return end   -- a trailing pass is already scheduled; this event rides along on it
   refreshPending = true
   C_Timer.After(due - now, function()
     refreshPending = false
@@ -2091,6 +2130,6 @@ function ns.BuildUI()
   win:Show()
 
   -- live ticker: keep the timer / g-hr moving while shown
-  C_Timer.NewTicker(1, function() ns.RefreshUI() end)
+  C_Timer.NewTicker(1, function() ns.RefreshUI(true) end)   -- tick pass: may skip what can't have changed
   ns.RefreshUI()
 end
