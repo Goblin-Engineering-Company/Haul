@@ -1,5 +1,7 @@
 -- Options.lua — configuration page. Everything is configurable here.
 local ADDON, ns = ...
+-- WoW: Forever (iface 16001) dropped the deprecated item globals; alias to C_Item (retail keeps both).
+local GetItemInfo = GetItemInfo or (C_Item and C_Item.GetItemInfo)
 local Theme = LibStub("GECTheme-1.0").ForAddon(
   function() return (HaulDB and HaulDB.themePreset) or "gruvbox" end,
   function(v) HaulDB.themePreset = v end)
@@ -189,8 +191,6 @@ local function Build()
   })
 
 
-  -- reserve a bottom band for the dev Reload-UI/console bar (built above) so tab pages stop ABOVE it
-  -- instead of overrunning it. Public builds have no bar, so they keep the tight 12px inset.
   local PAGE_BOTTOM = Haul.IsDev() and 40 or 12
   local function MakePage()
     local p = CreateFrame("Frame", nil, winContent)
@@ -199,7 +199,7 @@ local function Build()
     p:Hide()
     return p
   end
-  -- Header + Watchers can overflow the visible area, so wrap each in a scroll child +
+  -- Header can overflow the visible area, so wrap each in a scroll child +
   -- an auto-hiding MinimalScrollBar. Returns (rawPage, child): the tab shows/hides
   -- `raw`; page content parents to `child`.
   local function MakeScrollPage(childH)
@@ -219,7 +219,7 @@ local function Build()
     return raw, child
   end
   local pData, pKeybinds, pLog = MakePage(), MakePage(), MakePage()
-  local pDebug   -- dev-only Dev tab; its page frame is created in the dev block below, so no dead frame ships
+  local pDebug
   local pGeneral = MakePage()   -- non-scroll: its content fits the fixed window, so no scrollbar reserve eats width
   local rawHeader, pHeader = MakeScrollPage(594)   -- +54 for the taller header-layout box
   local rawAbout, pAbout = MakeScrollPage(460)     -- scrollable About page (banner can push content below the fold)
@@ -230,7 +230,6 @@ local function Build()
     { key = "general",  label = "General",  page = pGeneral },
     { key = "header",   label = "Header",   page = rawHeader },
   }
-  -- (Watcher bars extracted to the standalone Gadgets addon — no Watchers tab here anymore.)
   TABS[#TABS + 1] = { key = "data",     label = "Data",     page = pData }
   TABS[#TABS + 1] = { key = "keybinds", label = "Keybinds", page = pKeybinds }
   TABS[#TABS + 1] = { key = "about",    label = "About",    page = rawAbout }
@@ -241,7 +240,7 @@ local function Build()
   function ShowTab(key)
     local found
     for _, t in ipairs(TABS) do if t.key == key then found = true end end
-    if not found then key = TABS[1].key end   -- e.g. "watchers" when the dev tab is hidden
+    if not found then key = TABS[1].key end   -- unknown or removed tab key: fall back to the first tab
     for _, t in ipairs(TABS) do t.page:SetShown(t.key == key) end
     tabSetActive(key)
     panel.currentTab = key
@@ -274,9 +273,8 @@ local function Build()
     Theme.Font(verFS, "textDim")
 
     -- Report a bug — deliberately at the TOP of About, exactly like SBF: when something is wrong this is the
-    -- page people open first, and a report is only worth having if it's the easiest thing on it to find. This
-    -- is the ONLY in-UI route for a shipped user (the Dev tab is stripped). Opens its own self-contained copy
-    -- window (Report.lua) with no dependency on any other addon.
+    -- page people open first, and a report is only worth having if it's the easiest thing on it to find. Opens
+    -- its own self-contained copy window (Report.lua) with no dependency on any other addon.
     local bug = CreateFrame("Button", nil, pAbout, "UIPanelButtonTemplate")
     bug:SetSize(150, 24); bug:SetPoint("TOP", verFS, "BOTTOM", 0, -10)
     bug:SetText("Report a bug"); Theme.Button(bug)
@@ -319,7 +317,7 @@ local function Build()
     urlEb:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
 
     -- Licensing — the short version of LICENSE.txt (proprietary Goblin Engineering Company license; the embedded
-    -- Libs/ are separately MIT). Just the notice + a pointer to the file for the full terms — no external ask.
+    -- Libs/ each keep their own upstream license). Just the notice + a pointer to the file for the full terms — no external ask.
     local licDiv = pAbout:CreateTexture(nil, "ARTWORK")
     licDiv:SetPoint("TOP", urlEb, "BOTTOM", 0, -18); licDiv:SetSize(430, 1); licDiv:SetColorTexture(unpack(Theme.colors.divider))
 
@@ -335,7 +333,7 @@ local function Build()
     licBody:SetPoint("TOP", licCopy, "BOTTOM", 0, -6); licBody:SetWidth(440); licBody:SetJustifyH("CENTER")
     licBody:SetText("Free to install, use, and read the source. You may not redistribute, re-host, publish "
       .. "modified or derivative versions, or use this code commercially without written permission. Embedded "
-      .. "libraries under Libs\\ are separately MIT-licensed under their own terms. See LICENSE.txt for full terms.")
+      .. "libraries under Libs\\ each keep their own upstream license (see Libs\\LICENSE). See LICENSE.txt for full terms.")
     Theme.Font(licBody, "textDim")
 
     -- keep the banner edge-to-edge + aspect-correct on resize, widen the dividers to match, and grow the scroll
@@ -482,7 +480,7 @@ local function Build()
     .. "whether you Ask or switch automatically."
   AttachTip(panel.mapLevelDD, "Map level", mlTip)
 
-  -- compose the two columns as locals so the dev Theme section can be appended under strip sentinels
+  -- compose the two columns as locals so extra sections can be appended
   -- explicit column min-widths so the tree's MinWidth() reflects the real content: a hosted-dropdown
   -- frame leaf reports lw()=0, so without these the derived window min would ignore the dropdowns.
   -- LEFT = label 92 + gap 8 + price dropdown 210 + section indent 10; RIGHT = 78 + 8 + 150 + 10.
@@ -545,7 +543,6 @@ local function Build()
         .. "The normal loot window still appears on its own when it needs you (a locked slot, an item above "
         .. "your group's loot-quality threshold, a bind-on-pickup confirm, or full bags), so nothing is ever "
         .. "silently lost.", "cbFastLoot"),
-      -- (Full kill tracking moved to the dev-only Dev tab.)
     },
   }
 
@@ -615,9 +612,6 @@ local function Build()
     },
   }
 
-  -- (The theme picker lives on the Dev tab now — it's dev-only, so it belongs there, not on General.
-  --  See the Dev page build below.)
-
   local genRoot, refs = Theme.Layout(pGeneral,
     { dir = "row", align = "start", gap = 12, pad = { t = 6, r = 8, b = 8, l = 8 }, leftCol, rightCol },
     { setParentHeight = false })
@@ -629,7 +623,7 @@ local function Build()
 
   panel.cbReset = refs.cbReset   -- "Reload before new session" toggle
   panel.cbInstance, panel.cbScenario, panel.cbMap, panel.cbPrompt = refs.cbInstance, refs.cbScenario, refs.cbMap, refs.cbPrompt
-  panel.cbFlush, panel.cbFastLoot = refs.cbFlush, refs.cbFastLoot   -- cbCLK (kill tracking) moved to the Dev tab
+  panel.cbFlush, panel.cbFastLoot = refs.cbFlush, refs.cbFastLoot
   -- ===================== HEADER: template + display styling — box tree =====================
   local TEMPLATE_BOX_H = 108
   local function MakeFixedTemplateEditor(parent, height, onChanged)

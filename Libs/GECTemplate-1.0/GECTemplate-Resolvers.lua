@@ -4,6 +4,9 @@
 local Tpl = LibStub and LibStub:GetLibrary("GECTemplate-1.0", true)
 if not Tpl then return end
 
+-- WoW: Forever (iface 16001) dropped the deprecated item globals; alias to C_Item (retail keeps both).
+local GetItemInfo = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+
 -- Catalog of built-in/ambient tokens for feed browsers (insert text + short description).
 Tpl.catalog = {
   { token = "{clock}",            desc = "time of day (HH:MM)" },

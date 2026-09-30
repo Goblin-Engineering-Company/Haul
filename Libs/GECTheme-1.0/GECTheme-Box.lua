@@ -672,7 +672,7 @@ local function hostHeight(widget, heightOpt)
   return 0
 end
 
--- ESCAPE HATCH: host a bespoke widget (a tree, pooled list, pixel grid, …) by placing it and owning the
+-- ESCAPE HATCH: host a bespoke widget (a tree, pooled list, custom canvas, …) by placing it and owning the
 -- whitespace around it; its internals are untouched. frame = widget, or { widget = w, height = n }. The
 -- box reports the widget's height (hostHeight), stretches its width on align="stretch", fills it when
 -- `grow` is set, and wires widget.Invalidate so a rebuild that changes size triggers ONE root relayout

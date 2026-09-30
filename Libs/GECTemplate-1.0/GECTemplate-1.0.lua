@@ -1,7 +1,7 @@
 -- GECTemplate-1.0 — shared {token} text-render engine for Goblin Engineering Company WoW addons.
 -- Lifted from Haul ns.RenderTemplate; standalone LibStub library with no WoW-API dependency.
 -- Grammar: {token}  {token.facet}  {token:color}  {token(arg)}  {"literal"}  {br}
-local MAJOR, MINOR = "GECTemplate-1.0", 14
+local MAJOR, MINOR = "GECTemplate-1.0", 15
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end   -- a newer copy is already loaded
 

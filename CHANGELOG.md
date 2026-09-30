@@ -1,9 +1,12 @@
-# Haul 2026.09.03.1
+# Haul 2026.09.30.2
 
-**A performance pass, a bug-report button, and a spot in the AddOns menu.**
+**Haul now runs on WoW: Forever, and pausing is more reliable.**
 
-- **Haul now idles quietly.** We did a performance pass on the live window. Before this, the window redid all of its work every second whether or not anything had changed: it replayed the whole session twice, re-priced every item, and re-laid out every row in the list, even while tracking was paused. Now a paused window does nothing but keep its buttons in sync, and a running window only refreshes the timer and per-hour figures each second, rebuilding the list only when something new lands. Every refresh also does half the work it used to. If Haul was showing up in your CPU usage on long farm sessions, this is the fix.
-- **Report a bug, in one click.** There is a new "Report a bug" button at the top of the About tab (also `/haul bug` followed by a short description). It opens a copyable summary of your setup: versions, price source, the settings that affect tracking, how much the current session has captured, and where you are as the new-session triggers see it. Paste it into your report and we can usually reproduce the problem without a back-and-forth. Your character name, realm, guild, and your loot are never included.
-- **Haul is listed in the AddOns menu.** Click the AddOns button on the minimap and Haul is there; one click opens the window.
+- **WoW: Forever support.** Haul now loads and tracks loot, gold per hour and pricing on the Forever client.
+- **Fish count as fish on Forever.** Forever uses the older ranked Fishing spells. Haul now recognizes all of them, so your catches are logged as fish instead of being mistaken for chest loot.
+- **Fixed: loot could stop counting after a pause.** If you combined saved sessions while tracking was paused, everything you looted after pressing Resume was left out of your haul. Resume now always picks tracking back up. If the affected session is still open, it counts correctly once you save it; sessions you already saved keep their old totals.
+- **Fixed: combining could leave out part of a session.** If you combined a session that you had earlier resumed or merged another run into, the combined total left out the run folded into it. New combines now count everything.
 
-Tracking, pricing, and sessions are unchanged.
+**Known issue on the Forever beta:** the beta client currently doesn't load saved addon data between sessions, so Haul's saved sessions and settings reset each time you launch. This is a beta client issue, and Haul will keep your data once it's fixed.
+
+Nothing else changes on retail. Tracking, pricing, and sessions work exactly as before.

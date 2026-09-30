@@ -1,5 +1,5 @@
 -- ImportExport.lua — settings as editable JSON. Copy it out, edit it anywhere
--- (the Helper app, a text editor), paste it back. Addons can't read/write files,
+-- (any text editor), paste it back. Addons can't read/write files,
 -- so copy/paste (and the SavedVariables mirror) is the channel.
 local ADDON, ns = ...
 local Theme = LibStub("GECTheme-1.0").ForAddon(function() return (HaulDB and HaulDB.themePreset) or "gruvbox" end)

@@ -4,6 +4,9 @@
 --   Expanded:  running-stats panel + a collapsible, scrollable item list +
 --              bottom buttons (Reset / Start-Stop / Save / Options).
 local ADDON, ns = ...
+-- WoW: Forever (iface 16001) dropped the deprecated item globals; alias to C_Item (retail keeps both).
+local GetItemInfo = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+local GetItemInfoInstant = GetItemInfoInstant or (C_Item and C_Item.GetItemInfoInstant)
 local Theme = LibStub("GECTheme-1.0").ForAddon(function() return (HaulDB and HaulDB.themePreset) or "gruvbox" end)
 
 local WIDTH       = 300
@@ -989,7 +992,7 @@ local function BuildKillCollectionEntries()
     end
     -- Effective kill count: a looted corpse IS a kill you were there for, so when NO kill EVENT was logged
     -- (12.0 makes combat names/GUIDs secret + loot-classification gaps leave count=0), fall back to the
-    -- looted-corpse count so the mob doesn't misleadingly read "0 kills". [[wow12-secret-combat-names]]
+    -- looted-corpse count so the mob doesn't misleadingly read "0 kills".
     local kc = math.max(e.count or 0, e.looted or 0)
     local unlooted = kc - (e.looted or 0)   -- kills we counted but didn't loot
     if unlooted > 0 then
@@ -1675,15 +1678,13 @@ end
 
 local Tpl = LibStub and LibStub("GECTemplate-1.0", true)
 
--- Read OTHER addons' feeds via the shared standard (replaces the bespoke Broker.lua resolver):
+-- Read OTHER addons' feeds via the shared standard:
 -- wiring GECData's consumer into Haul's engine makes {sbf.*}, {haul.*} and any LDB feed's {slug}/
 -- {slug.token} resolve in Haul's bar/detail templates. Idempotent (safe on /reload). {tsm.*} bridge
 -- tokens already resolve because Haul loads the Bridge files.
 --
--- DEV-ONLY: consuming outside (cross-addon GEC) feeds is gated behind Haul.IsDev(). Run from
--- PLAYER_LOGIN (Core) — after SavedVariables load — so the runtime `/haul dev` toggle (HaulDB.dev)
--- governs it; at file-load time HaulDB isn't loaded yet, so IsDev() couldn't see the saved flag.
--- Haul's native pricing/token feeds are untouched (always on).
+-- Consuming outside feeds is off in this build (the IsDev gate). Runs from PLAYER_LOGIN (Core), after
+-- SavedVariables load. Haul's native pricing/token feeds are untouched (always on).
 function ns.InitFeedConsumer()
   if not (Haul and Haul.IsDev and Haul.IsDev()) then return end
   local GECData = LibStub and LibStub("GECData-1.0", true)

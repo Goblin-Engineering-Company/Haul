@@ -41,6 +41,15 @@ local function itemKey(id, from) return (from and from ~= "") and (tostring(id) 
 -- store tag (e.src = "Haul"), which must NOT be read as an acquisition source.
 local ACQ_SRC = { mail = true, craft = true, vendor = true }
 
+-- Pause windows from lifecycle markers: GECStore's Session.PauseWindows, the ONE pairing rule every reader
+-- shares (a second pause while paused opens no second window). Resolved at call time because the embedded
+-- lib loads first in-game and the offline test loads it itself. Without the lib there are no windows.
+local function markerPauseWindows(markers)
+  local GS = LibStub and LibStub.GetLibrary and LibStub:GetLibrary("GECStore-1.0", true)
+  local pw = GS and GS.Session and GS.Session.PauseWindows
+  return pw and pw(markers or {}) or {}
+end
+
 -- Rebuild from an ordered event list. Returns a table mirroring the snapshot's reconstructable fields.
 -- `opts.priceSource` (optional) labels the rebuild; per-item value comes from embedded `v`/`q` only.
 function Replay.Rebuild(events, opts)
@@ -72,11 +81,7 @@ function Replay.Rebuild(events, opts)
   -- opts.countPaused = true (HaulDB.countPausedByDefault) disables exclusion.
   local pauseWins = {}
   if not opts.countPaused then
-    for _, m in ipairs(opts.markers or {}) do
-      if m.k == "pause" then pauseWins[#pauseWins + 1] = { p = m.t }
-      elseif m.k == "resume" then local last = pauseWins[#pauseWins]; if last and not last.r then last.r = m.t end
-      end
-    end
+    pauseWins = markerPauseWindows(opts.markers)
     if #pauseWins == 0 then
       for _, e in ipairs(events or {}) do
         local ek = kindOf(e)
@@ -283,10 +288,9 @@ function Replay.Rebuild(events, opts)
     local mk = m.k
     if mk == "start" then startT = startT or m.t; if m.who then character = m.who end
     elseif mk == "stop" then stopT = m.t
-    elseif mk == "pause" then pauses[#pauses + 1] = { p = m.t }
-    elseif mk == "resume" then local last = pauses[#pauses]; if last and not last.r then last.r = m.t end
     end
   end
+  if opts.markers then for _, w in ipairs(markerPauseWindows(opts.markers)) do pauses[#pauses + 1] = w end end
 
   local durationSec
   if startT and stopT then

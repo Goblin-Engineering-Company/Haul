@@ -4,6 +4,10 @@
 
 Haul is a farming session tracker that captures *everything*: every loot drop, every coin, experience, reputation, currencies, kills, and gathering. It values the lot and rolls it into a clean movable bar that tells you what this farm actually earns per hour.
 
+## Retail and WoW: Forever
+
+Haul runs on both retail and WoW: Forever. Install it into each client's own AddOns folder and it tracks the same way on both, fishing catches included.
+
 ## The Custom Header Bar
 
 A compact, movable readout you design yourself with template fields. Session time, haul value, gross, gold per hour, cash, arranged however you like. Glance at it mid-pull, or leave it running all night.

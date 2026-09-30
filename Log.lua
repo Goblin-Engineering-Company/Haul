@@ -47,7 +47,7 @@ local function Session()
   return sessionCtrl
 end
 ns.SessionCtrl = Session   -- Core uses this for Fold / Sideline / Restore / RepairIfDangling / OnEvent
-if Haul then Haul.SessionCtrl = Session end   -- global entry point (GEC-Console purge / diagnostics)
+if Haul then Haul.SessionCtrl = Session end   -- global entry point to the session controller
 
 -- Append an exclusion toggle to the MARKERS stream (spec §3.4). on=true → "exclude" (item now excluded),
 -- on=false → "include" (re-included). The controller resolves the running-target into the record at close.
@@ -207,7 +207,7 @@ end
 
 -- DEV: purge the EVENT LOG — clears the append-only journal (HaulData.streams.events) AND the session
 -- index (HaulData.sessions), since orphaned index rows are useless without their events. This is what the
--- "Purge log" dev button has always PROMISED; previously it cleared only the index, so the stream never
+-- "Purge log" action has always PROMISED; previously it cleared only the index, so the stream never
 -- emptied (the bug: "sessions cleared, logs wouldn't"). Manual/pre-release only — the caller reloads after,
 -- and a consuming reader (Uplink) re-syncs from an empty stream. Saved Sessions (HaulDB.history, a separate
 -- SV) are UNTOUCHED. Returns the number of event entries removed. (Post-release, clearing an append-only

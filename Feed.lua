@@ -14,7 +14,7 @@
 --   "number" → the .copper raw-integer money tokens (consumer formats/colors them).
 --
 -- Producer-only: needs LibStub + CallbackHandler + LDB + GECData (the typed rendering happens
--- consumer-side, no GECTemplate here). Haul's own Broker.lua is a separate CONSUMER, untouched.
+-- consumer-side, no GECTemplate here).
 local ADDON, ns = ...
 
 local Data = LibStub and LibStub:GetLibrary("GECData-1.0", true)

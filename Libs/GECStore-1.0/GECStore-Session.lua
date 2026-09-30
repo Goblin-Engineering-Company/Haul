@@ -16,8 +16,12 @@ if not lib then return end
 -- newer Session engine with its older methods (the documented "no change" bug class). Only attach when THIS
 -- copy's SESSION_MINOR beats what's stamped, then stamp it — newest wins regardless of addon load order, and
 -- an older copy loading later is a no-op. Bump SESSION_MINOR on every Session change that must supersede copies.
-local SESSION_MINOR = 3   -- 2: export the CalVer comparator as Session.VerLE (one comparator, no per-addon copies)
+local SESSION_MINOR = 5   -- 2: export the CalVer comparator as Session.VerLE (one comparator, no per-addon copies)
                           -- 3: reduceSegment excludes vendor-purchased loot (Session.IsHaulLoot; matches Replay)
+                          -- 4: one pause-window pairing (Session.PauseWindows); a pause while already paused is a
+                          --    no-op, so Combine-while-paused no longer leaves the first pause open forever
+                          -- 5: Resolve flattens nested folds (a Resumed/Merged row later Combined keeps the value of
+                          --    what was folded into it); a fold pointing at a missing record is skipped, not a crash
 if lib._sessionMinor and lib._sessionMinor >= SESSION_MINOR then return end
 lib._sessionMinor = SESSION_MINOR
 lib.Session = lib.Session or {}
@@ -147,14 +151,30 @@ function Session.Resolve(data)
     end
   end
 
+  -- Every session folded into `sid`, NESTED folds included, depth-first in fold order (a source's own
+  -- sources come before it). A Resumed or Merged row that is later Combined carries what was folded into it;
+  -- reading only one level dropped that value. `seen` stops a cycle; a source with no record is skipped.
+  local function flattenFolds(sid, seen, list)
+    local fold = foldOf[sid]
+    if not fold then return list end
+    for _, fromsid in ipairs(fold.from) do
+      if not seen[fromsid] then
+        seen[fromsid] = true
+        flattenFolds(fromsid, seen, list)
+        if sessions[fromsid] and sessions[fromsid].closedAt then list[#list + 1] = fromsid end
+      end
+    end
+    return list
+  end
+
   local out = {}
   for sid, rec in pairs(sessions) do
     if rec.closedAt and not absorbed[sid] then
       local fold = foldOf[sid]
       if fold then
-        -- rolled-up view: segments = absorbed (in fold order) then the surviving session
+        -- rolled-up view: segments = absorbed (flattened, in fold order) then the surviving session
         local segs = {}
-        for _, fromsid in ipairs(fold.from) do segs[#segs + 1] = reduceSegment(data, fromsid) end
+        for _, fromsid in ipairs(flattenFolds(sid, { [sid] = true }, {})) do segs[#segs + 1] = reduceSegment(data, fromsid) end
         segs[#segs + 1] = reduceSegment(data, sid)
 
         local builds, seen = {}, {}
@@ -204,21 +224,43 @@ end
 
 -- ===== close-time derivations (PURE; the capture-side counterparts Resolve reads) =====
 
+-- THE pause-window pairing (every reader uses this: _deriveTiming, sealOpenPause, Haul's Replay). Takes an
+-- ordered list of markers (only k/t are read; pass one sid's markers) and returns [{p, r?}] windows.
+--   * a pause while a window is already open does NOT open a second window (you can't be paused twice);
+--   * a resume closes the open window, EXCEPT the resume that pairs with such an ignored pause at the same
+--     second (the pause/resume bracket CtrlMT:Combine wrote around its work before MINOR 4) — that one is
+--     consumed, so the player's own later resume is the one that ends the window.
+-- Before MINOR 4 each pause opened a window and a resume closed only the LAST one, so pause, Combine, resume
+-- left the first window open to the end and every later event was excluded. Records written that way pair
+-- correctly under this rule. An unclosed window stays open (dangling). Pure.
+function Session.PauseWindows(markers)
+  local wins, open, ignoredAt = {}, nil, nil
+  for _, m in ipairs(markers or {}) do
+    if m.k == "pause" then
+      if open then ignoredAt = m.t
+      else open = { p = m.t }; wins[#wins + 1] = open end
+    elseif m.k == "resume" and open then
+      if ignoredAt and m.t == ignoredAt then ignoredAt = nil
+      else open.r = m.t; open, ignoredAt = nil, nil end
+    end
+  end
+  return wins
+end
+
 -- Derive the timing skeleton for `sid` from the markers stream: startedAt/closedAt/pauses(+closeReason).
--- Pauses pair pause→resume in stream order; an unclosed pause stays open (dangling). Pure (spec §3.3/§4).
+-- Pauses pair via Session.PauseWindows; an unclosed pause stays open (dangling). Pure (spec §3.3/§4).
 function Session._deriveTiming(markers, sid)
   local startedAt, closedAt, closeReason
-  local pauses, open = {}, nil
+  local mine = {}
   for _, m in ipairs(markers or {}) do
     if m.sid == sid then
       if m.k == "start" then startedAt = m.t
       elseif m.k == "stop" then closedAt, closeReason = m.t, m.reason
-      elseif m.k == "pause" then open = { p = m.t }; pauses[#pauses + 1] = open
-      elseif m.k == "resume" then if open then open.r = m.t; open = nil end
+      elseif m.k == "pause" or m.k == "resume" then mine[#mine + 1] = m
       end
     end
   end
-  return { startedAt = startedAt, closedAt = closedAt, pauses = pauses, closeReason = closeReason }
+  return { startedAt = startedAt, closedAt = closedAt, pauses = Session.PauseWindows(mine), closeReason = closeReason }
 end
 
 -- Resolve the excluded item-id set as of `atTime` — the global running-target (spec §3.4):
@@ -322,14 +364,28 @@ function CtrlMT:CurrentBuildIndex()
   return 0
 end
 
-function CtrlMT:Pause()
-  local open = store(self)._open; if not open then return end
-  self._handle:Append("markers", { k = "pause", sid = open.sid, t = lib._now() })
-  fire(self, "pause", open.sid)
+-- true when the open session's last pause window has no resume yet.
+local function isPaused(self, sid)
+  local st = store(self)
+  local wins = Session._deriveTiming(st.streams and st.streams.markers, sid).pauses
+  local last = wins[#wins]
+  return (last and last.p and not last.r) and true or false
 end
 
+-- Pause the open session. A no-op while it's already paused (a second pause marker would open a second
+-- window that no resume closes). Returns true when a pause marker was written.
+function CtrlMT:Pause()
+  local open = store(self)._open; if not open then return false end
+  if isPaused(self, open.sid) then return false end
+  self._handle:Append("markers", { k = "pause", sid = open.sid, t = lib._now() })
+  fire(self, "pause", open.sid)
+  return true
+end
+
+-- Resume the open session. A no-op when it isn't paused.
 function CtrlMT:Resume()
   local open = store(self)._open; if not open then return end
+  if not isPaused(self, open.sid) then return end
   self._handle:Append("markers", { k = "resume", sid = open.sid, t = lib._now() })
   fire(self, "resume", open.sid)
 end
@@ -465,8 +521,7 @@ end
 function CtrlMT:Combine(fromsids, prices)
   if not fromsids or #fromsids == 0 then return nil end
   local st = store(self)
-  local paused = false
-  if st._open then self:Pause(); paused = true end
+  local paused = st._open and self:Pause() or false   -- bracket only a RUNNING session (Pause no-ops if paused)
   local now = lib._now()
   local sid = Session._newSid(now)
   local who = (lib._identity and lib._identity().name) or nil

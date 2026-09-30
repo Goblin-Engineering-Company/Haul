@@ -19,7 +19,7 @@
 --
 -- EMBED-SYNC: copied verbatim into addons/_libs/, addons/SBF/Libs/, addons/Haul/Libs/. A lib edit must propagate
 -- to ALL copies — bump MINOR so the newest copy wins via LibStub until the others sync.
-local MAJOR, MINOR = "GECLoot-1.0", 14  -- 14: in-window source deferral — re-resolve src=nil slots each auto-loot tick + on LOOT_OPENED so the callback carries the REAL objID (GetLootSourceInfo lags window-open); fishing-tail fallback (13) covers the never-resolves case
+local MAJOR, MINOR = "GECLoot-1.0", 15  -- 15: WoW Forever / Classic Fishing spell ids + name fallback via PROFESSIONS_FISHING (the retail 131474 may not exist there, which left fish loot tagged "chest"). 14: 14: in-window source deferral — re-resolve src=nil slots each auto-loot tick + on LOOT_OPENED so the callback carries the REAL objID (GetLootSourceInfo lags window-open); fishing-tail fallback (13) covers the never-resolves case
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end
 
@@ -61,7 +61,11 @@ lib.CONTAINER_WINDOW = lib.CONTAINER_WINDOW or 2
 -- variants (Underlight Angler, etc.) use others. They're ALL named "Fishing", so we match by known-id fast-path
 -- OR by name (locale-proof: compare to the localized name of the base fishing spell). isFishingSpell() gates
 -- both the channel tracking and the last-cast fallback.
-local FISHING_SPELLS   = { [131474] = true, [131476] = true }
+-- WoW: Forever / Classic cast the vanilla-style rank spells (7620 Apprentice .. 18248 Artisan, 33095 Master) instead,
+-- and the retail 131474 may not exist there at all, so its name can't anchor the fallback either: the name
+-- compare also accepts PROFESSIONS_FISHING, the client's own localized "Fishing" string.
+local FISHING_SPELLS   = { [131474] = true, [131476] = true,
+                           [7620] = true, [7731] = true, [7732] = true, [18248] = true, [33095] = true }
 local SPELL_PICKPOCKET = 921
 local SPELL_OPENING    = 3365
 -- "Opening" has MANY ranks/variants — 3365 is only rank 1. Clicking a world chest fires whichever applies
@@ -79,7 +83,7 @@ local function spellName(id) return id and C_Spell and C_Spell.GetSpellName and 
 local function isFishingSpell(id)
   if not id then return false end
   if FISHING_SPELLS[id] then return true end
-  local base = spellName(131474)          -- localized "Fishing" (cached would be nicer, but this is cheap + rare)
+  local base = spellName(131474) or PROFESSIONS_FISHING   -- localized "Fishing" (cheap + rare, so uncached)
   return (base and spellName(id) == base) or false
 end
 local function isOpeningSpell(id)

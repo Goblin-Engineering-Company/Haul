@@ -30,7 +30,7 @@ end
 -- every GEC addon that's loaded, with its version — "which builds were in play" is the first question we
 -- ask on any report, and a mismatched pair (Haul new, a shared lib old) is a real failure mode. The two
 -- price addons are listed too: they are OptionalDeps and their absence explains most "0g" reports.
-local GEC_ADDONS = { "Haul", "SBF", "Megaphone", "Gadgets", "Coffer", "GEC-Console", "GECStore-session" }
+local GEC_ADDONS = { "Haul", "SBF", "Megaphone", "Gadgets", "Coffer", "GECStore-session" }
 local PRICE_ADDONS = { "TradeSkillMaster", "Auctionator" }
 local LIBS = { "GECBind-1.0", "GECLoot-1.0", "GECTheme-1.0", "GECStore-1.0", "GECData-1.0", "GECReader-1.0",
                "GECMap-1.0", "GECStoreView-1.0", "GECQuest-1.0", "GECTemplate-1.0", "GECWowToken-1.0",
@@ -294,9 +294,8 @@ function Haul.BugReport(note)
   return table.concat(out, "\n")
 end
 
--- ALWAYS opens its own copy window, for everyone. It must never depend on the dev console: a public user
--- doesn't have GEC-Console installed, and the report is worth exactly nothing if they can't select and copy
--- it. Self-contained, closes on Escape, pre-selects the text so it's Ctrl+C and done. Same frame as SBF's.
+-- ALWAYS opens its own copy window, for everyone: the report is worth nothing if the player can't select
+-- and copy it. Self-contained, closes on Escape, pre-selects the text so it's Ctrl+C and done. Same frame as SBF's.
 function Haul.ShowBugReport(note)
   local text = Haul.BugReport(note)
   local f = Haul._reportFrame

@@ -1,10 +1,16 @@
 -- Core.lua — session state, controls, stats, public API, SavedVariables.
 local ADDON, ns = ...
+-- WoW: Forever (iface 16001) dropped the deprecated item globals; alias to C_Item (retail keeps both).
+local GetItemInfo = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+local GetItemInfoInstant = GetItemInfoInstant or (C_Item and C_Item.GetItemInfoInstant)
+local GetCoinTextureString = GetCoinTextureString or (C_CurrencyInfo and C_CurrencyInfo.GetCoinTextureString)
+-- Forever has no CombatLogGetCurrentEventInfo; the opt-in CLEU kill path then sees nil and returns.
+local CombatLogGetCurrentEventInfo = CombatLogGetCurrentEventInfo or function() end
 
 -- ⚠️ Kill tracking is fed from the CHAT_MSG_COMBAT_XP_GAIN "X dies…" message (ns._recordKill), NOT from
 -- COMBAT_LOG_EVENT_UNFILTERED — that event is protected and its RegisterEvent is blocked by cross-addon taint in
--- a real addon environment (four workarounds all failed). See CombatLogInit.lua + auto-memory
--- [[combat-log-protected-registration-taint]]. Trade-off: only XP-granting kills are counted.
+-- a real addon environment (four workarounds all failed). See CombatLogInit.lua.
+-- Trade-off: only XP-granting kills are counted.
 
 Haul = Haul or {}          -- global: public API + Bindings.xml shims
 
@@ -70,7 +76,7 @@ local DB_DEFAULTS = {
   killsCombatLog = false,            -- Kills: try the combat log for EVERY kill (incl. gray/no-XP). OFF = the
                                      -- popup-free XP-message source (XP-granting kills only). ON may trigger the
                                      -- WoW taint warning on sessions where other addons (Auctionator/TSM) taint
-                                     -- the stack — WoW 12.0 blocks COMBAT_LOG registration there. See auto-memory.
+                                     -- the stack — WoW 12.0 blocks COMBAT_LOG registration there.
   gatherLootWindowSec = 4,           -- Gathering attribution: only log looted items as "gathered" (node loot)
                                      -- when a real gather node ("You perform <skill> on <node>") was opened
                                      -- within this many seconds. Fishing/plain containers fire NO opening line,
@@ -116,7 +122,7 @@ local DB_DEFAULTS = {
   bgAlpha = 0.88,                    -- window background opacity (Display slider)
   history = {},
   sessionsMineOnly = false,          -- Saved Sessions: filter to current character
-  watchers = {},                     -- extra spawnable header bars (see Watchers.lua)
+  watchers = {},                     -- extra spawnable header bars
   -- flush / reload-to-sync
   flushEnabled = false,              -- auto-reload timer off by default
   flushSeconds = 600,                -- 10m, used only when flushEnabled
@@ -1589,7 +1595,7 @@ function ns._logMobEvent(kind, fields)
   -- location on EVERY session-log event, same as every other appender here. This path was the one exception:
   -- gather/mob events (mobloot/gatherloot/mobcash/looted) had no `loc`, so saved-session gather/kill detail
   -- couldn't be placed on a map. RULE: every data point carries a location. Long-term this moves into the
-  -- shared store stamp so it can never be forgotten again — see [[node-map-data]].
+  -- shared store stamp so it can never be forgotten again.
   local e = { kind = kind, t = time(), loc = CurrentLocation() }
   if fields then for k, v in pairs(fields) do e[k] = v end end
   e.bid = ns.CurrentBatch()
@@ -2550,9 +2556,7 @@ function ns.SetHistoryDeleted(i, deleted)
   if not h then return end
   h.deleted = deleted and time() or nil
 end
--- SHIPS (must not be stripped): "Combine selected" (ns.CombineHistory) depends on this to surface the
--- combined survivor into history — stripping it broke Combine in the public build while it still reported
--- success. The dev-only "Rebuild from log" button also calls it, but that button is stripped on its own.
+-- "Combine selected" (ns.CombineHistory) uses this to surface the combined session in history.
 -- Rebuild saved sessions from the always-on event log (HaulData.log). Each event carries its session id
 -- (sid); group by sid, Replay each group into a snapshot-shaped entry, and add any sid NOT already in
 -- history. Non-destructive recovery: the log is the source of truth, so a purged / never-saved session
@@ -2860,7 +2864,7 @@ local function WriteState()
     char = (UnitName and UnitName("player")) or "?",
     realm = (GetRealmName and GetRealmName()) or "?",
     session = snap, history = HaulDB.history,
-    settings = ns.ExportTable and ns.ExportTable() or nil,  -- editable config for the Helper
+    settings = ns.ExportTable and ns.ExportTable() or nil,  -- editable config (same shape as Export)
     json = jsonEncode({ session = snap }),
   }
 end
@@ -2912,8 +2916,10 @@ local function CheckInstanceTransition()
       local cur = ns.session
       if cur then
         cur._wasRunning = cur.running and true or false
-        if cur.running then cur.accum = (cur.accum or 0) + (GetTime() - cur.t0); cur.running = false end
-        if cur.sid and ns.LogPause then ns.LogPause(cur.sid) end   -- suspend A (open-world)
+        if cur.running then
+          cur.accum = (cur.accum or 0) + (GetTime() - cur.t0); cur.running = false
+          if cur.sid and ns.LogPause then ns.LogPause(cur.sid) end   -- suspend A (open-world); already paused = no marker
+        end
       end
       ns.sidelined = cur
       do local S = ns.SessionCtrl and ns.SessionCtrl(); if S then S:Sideline() end end   -- park A so B's Begin can't clobber it
@@ -3183,14 +3189,14 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
       if HaulDB.tsmPriceStr == "dbmarket" then HaulDB.tsmPriceStr = "dbminbuyout" end
     end
     if ns.BuildUI then ns.BuildUI() end
-    if ns.InitFeedConsumer then ns.InitFeedConsumer() end   -- dev-only: consume outside (GEC) feeds
+    if ns.InitFeedConsumer then ns.InitFeedConsumer() end   -- consume outside (GEC) feeds where enabled
     if ns.InitOptions then ns.InitOptions() end   -- register the AddOns Settings page
     if ns.ApplyKeybinds then ns.ApplyKeybinds() end   -- apply the Keybinds-tab combos
     ns.ApplyFastLoot()                                 -- register/unregister Haul with the shared fast-loot lib + mirror debug
     if ns.StartFlush then ns.StartFlush() end
     ns.Print("loaded v" .. tostring(Haul.BUILD) .. ", source: "
       .. Theme.Accent(HaulDB.priceSource) .. ". /haul for window."
-      .. (Haul.IsDev and Haul.IsDev() and " /haul diag to test prices." or ""))   -- diag dispatch is dev-only (stripped in public)
+      .. (Haul.IsDev and Haul.IsDev() and " /haul diag to test prices." or ""))
   elseif event == "PLAYER_ENTERING_WORLD" then
     -- arg1 = isInitialLogin, arg2 = isReloadingUi. A TRUE fresh login (not /reload, not zoning)
     -- starts a BRAND-NEW session — /reload still resumes. The resumed previous run is banked to
@@ -3217,7 +3223,7 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
     else
       -- RULE (2026-07-26): a session NEVER crosses characters — merge/resume are the only sanctioned
       -- cross-character flows. Safety net for a character switch that did NOT read as an initial login
-      -- (seen live: Resta farmed 651 events into Kalomat's session because the arg1 branch never ran):
+      -- (seen live: one character's loot landed in another character's session because the arg1 branch never ran):
       -- whatever the flags said, an open session created by a DIFFERENT character closes at ITS last
       -- activity — the creator keeps the credit — and a fresh session begins for the current character.
       -- Same-character zoning is a no-op (names match), so this runs safely on every world entry.
@@ -3270,8 +3276,8 @@ SlashCmdList.HAUL = function(msg)
   msg = raw:lower()
   if msg == "new" or msg == "reset" then ns.Reset()   -- "new" is the public name; "reset" kept as a quiet alias
   elseif msg == "bug" or msg == "bugreport" or msg:match("^bug%s") or msg:match("^bugreport%s") then
-    -- PUBLIC: copyable, PII-free diagnostic blob (Report.lua). MUST stay outside every @strip block: this and the
-    -- About-tab button are the ONLY routes a shipped user has to a report. Everything after the word is the
+    -- Copyable, PII-free diagnostic blob (Report.lua). This and the About-tab button are the only routes a
+    -- player has to a report. Everything after the word is the
     -- reporter's own description, included verbatim.
     if Haul.ShowBugReport then Haul.ShowBugReport(raw:match("^%S+%s+(.+)$")) end
   elseif msg == "save" then ns.SaveSession()

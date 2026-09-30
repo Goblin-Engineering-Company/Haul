@@ -1,5 +1,8 @@
 -- Pricing.lua — per-unit item value from the chosen source, vendor as the floor.
 local ADDON, ns = ...
+-- WoW: Forever (iface 16001) dropped the deprecated item globals; alias to C_Item (retail keeps both).
+local GetItemInfo = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+local GetItemInfoInstant = GetItemInfoInstant or (C_Item and C_Item.GetItemInfoInstant)
 
 -- Value (copper) of `itemLink` from ONE named source, or nil if that source has no value for it.
 local function computePriceFrom(src, itemLink)
