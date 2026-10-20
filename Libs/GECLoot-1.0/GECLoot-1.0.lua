@@ -19,7 +19,7 @@
 --
 -- EMBED-SYNC: copied verbatim into addons/_libs/, addons/SBF/Libs/, addons/Haul/Libs/. A lib edit must propagate
 -- to ALL copies — bump MINOR so the newest copy wins via LibStub until the others sync.
-local MAJOR, MINOR = "GECLoot-1.0", 15  -- 15: WoW Forever / Classic Fishing spell ids + name fallback via PROFESSIONS_FISHING (the retail 131474 may not exist there, which left fish loot tagged "chest"). 14: 14: in-window source deferral — re-resolve src=nil slots each auto-loot tick + on LOOT_OPENED so the callback carries the REAL objID (GetLootSourceInfo lags window-open); fishing-tail fallback (13) covers the never-resolves case
+local MAJOR, MINOR = "GECLoot-1.0", 17  -- 17: "empty" = no slot holding anything (a window of None-type slots counts too). 16: close an EMPTY loot window while auto-looting (WoW Forever now opens one for a corpse with no loot; the suppressed window sat open and invisible, holding the character in the loot state until they moved). 15: WoW Forever / Classic Fishing spell ids + name fallback via PROFESSIONS_FISHING (the retail 131474 may not exist there, which left fish loot tagged "chest"). 14: 14: in-window source deferral — re-resolve src=nil slots each auto-loot tick + on LOOT_OPENED so the callback carries the REAL objID (GetLootSourceInfo lags window-open); fishing-tail fallback (13) covers the never-resolves case
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end
 
@@ -105,6 +105,9 @@ local PREFIX = "|cff8fd3c4GECLoot|r "   -- brand-neutral teal prefix for debug l
 -- the fishing CHANNEL itself (start → active; stop → a short tail for the loot that follows) which is immune to
 -- intervening casts and long waits. FISH_TAIL is the grace after reel-in during which loot is still "fish".
 lib.FISH_TAIL = lib.FISH_TAIL or 6
+-- An EMPTY loot window (no slots at all) while auto-loot is active is closed after this many seconds, 0 = at once,
+-- false = never. The short wait is so a window whose slots simply haven't arrived yet is never closed early.
+if lib.CLOSE_EMPTY_AFTER == nil then lib.CLOSE_EMPTY_AFTER = 0.2 end
 local EVENTS = {
   "LOOT_READY", "LOOT_OPENED", "LOOT_CLOSED", "LOOT_SLOT_CLEARED", "UI_ERROR_MESSAGE",
   "UNIT_SPELLCAST_SUCCEEDED", "UNIT_SPELLCAST_CHANNEL_START", "UNIT_SPELLCAST_CHANNEL_STOP", "CHAT_MSG_OPENING",
@@ -420,7 +423,34 @@ local function onLootSlotCleared(slot)
   dprint(itemLine(info))
 end
 
+-- The window opened with nothing in it. The player never sees it (auto-loot keeps the frame hidden), so nothing
+-- would ever close it: recheck after a beat and close it ourselves if it is still open and still empty.
+local function windowEmpty()
+  local num = GetNumLootItems() or 0
+  for slot = 1, num do
+    local st = GetLootSlotType and GetLootSlotType(slot)
+    if st == nil or st ~= SLOT_NONE then return false end              -- unreadable type counts as "has something"
+  end
+  return true
+end
+lib.WindowEmpty = windowEmpty
+
+local function onLootOpenedEmpty()
+  local wait = lib.CLOSE_EMPTY_AFTER
+  if wait == false or not anyRequester() or not CloseLoot then return end
+  lib._emptyGen = (lib._emptyGen or 0) + 1
+  local gen = lib._emptyGen
+  local function close()
+    if gen ~= lib._emptyGen or not lib._lootOpen then return end        -- closed, or a newer window took over
+    if not windowEmpty() then return end                                -- the loot arrived after all
+    dprint("empty window - closing")
+    CloseLoot()
+  end
+  if type(wait) == "number" and wait > 0 and C_Timer and C_Timer.After then C_Timer.After(wait, close) else close() end
+end
+
 local function onLootClosed()
+  lib._lootOpen = nil
   -- If a loot window closes while we're inside the fishing tail, that WAS this reel-in's fish window (one per
   -- reel-in). Mark it consumed so a subsequent instant-open chest in the same tail no longer classifies as
   -- fish. Reset only on the next reel-in (CHANNEL_STOP). Harmless if the window was itself a chest.
@@ -454,7 +484,9 @@ end
 
 lib._frame:SetScript("OnEvent", function(_, event, a1, a2, a3)
   if event == "LOOT_READY" or event == "LOOT_OPENED" then
+    lib._lootOpen = true
     onLootReady()
+    if event == "LOOT_OPENED" and windowEmpty() then onLootOpenedEmpty() end
   elseif event == "LOOT_SLOT_CLEARED" then
     onLootSlotCleared(a1)
   elseif event == "LOOT_CLOSED" then
