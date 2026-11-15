@@ -26,7 +26,6 @@ end
 -- — so when unsafe it just no-ops and lets the UX (the disabled Save button, or this nudge) handle it.
 -- Callers that sequence around a reload (New-session) use the return value.
 function ns.RequestReload(_force)
-  ns.WriteState()                     -- keep the saved-state mirror current first
   if ns.SafeNow() then
     C_UI.Reload()
     return true

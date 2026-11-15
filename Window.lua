@@ -1812,6 +1812,9 @@ local refreshLast, refreshPending = 0, false
 -- changed (see DoRefreshUI); an event pass never skips. A tick that lands inside the throttle window simply
 -- rides along on the pending EVENT pass (which is a superset), so it's dropped rather than scheduled.
 function ns.RefreshUI(tick)
+  -- an EVENT pass means state may have changed in place: invalidate ComputeStats' rebuild cache (Core.lua).
+  -- Bumped before the hidden-window return so the LDB feed (which reads stats with the window closed) sees it too.
+  if not tick then ns._statsGen = (ns._statsGen or 0) + 1 end
   if not win or not win:IsShown() then return end
   local wait = HaulDB and HaulDB.refreshThrottle or 0.1
   if wait <= 0 then refreshLast = GetTime(); return DoRefreshUI(tick) end

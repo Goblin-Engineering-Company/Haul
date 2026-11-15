@@ -1,7 +1,7 @@
 -- GECStore-1.0 — shared persistent journal/event store + character/place identity registry
 -- for Goblin Engineering Company WoW addons. Pure logic is headless-testable (luajit); all live-WoW
 -- reads (identity, build stamp, entity resolve, faction standing) are delegated to GECReader-1.0.
-local MAJOR, MINOR = "GECStore-1.0", 28   -- 28: Session.VerLE exported (the ONE CalVer comparator; build-gated data repairs/purges use it instead of a local copy). 27: Resolve/reduceSegment exclude events INSIDE a pause window from session value (pause = "not the session"; resolution-side, so pause-editing re-includes later). 26: Close/RepairIfDangling SEAL an open pause (insert the resume marker at the closing timestamp — a frozen record never ships a dangling {p} span). 25: per-stream `seq` durable stream key + `_streamMeta{seq,base}`; deletion API (Truncate/PurgeBelow, the ONLY legal stream removal) + StreamGaps integrity check; self-heal seq seed at RegisterStore. 24: singleton-guard the snapshot + CHAT_MSG_SKILL live frames so a LibStub upgrade re-run (embed drift) can't spawn duplicate listeners — the skill-up double-append fix. 23: + "quest" registry type (GECQuest atlas). 22: PurgeThroughBuild (unload sessions/events/markers at-or-before a build). 21: NewSession (atomic Close→Begin for the "New" button). 20: Combine (retrospective typed combine session). 19: PlaceIndex uses GECMap for the place id. 18: RepairOrphans (encapsulate events whose markers were lost). 17: RepairIfDangling reasonOverride. 16: mail+vendor excluded from value. 15: character bound at Begin. 14: Sideline/Restore. 13: + Session module.
+local MAJOR, MINOR = "GECStore-1.0", 30   -- 30: packed sessions, SHADOW mode only (PackEncode/PackDecode/PackChunk/UnpackChunk; Snapshot writes <SV>.packed.events[sid] + _format.packed when GECStoreDB.packShadow[<sv>] is on; the stream is untouched). 29: RegisterStore drops the loaded `_registry` export copy (Snapshot rebuilds it at logout), so the live session no longer holds a second full registry in memory. 28: Session.VerLE exported (the ONE CalVer comparator; build-gated data repairs/purges use it instead of a local copy). 27: Resolve/reduceSegment exclude events INSIDE a pause window from session value (pause = "not the session"; resolution-side, so pause-editing re-includes later). 26: Close/RepairIfDangling SEAL an open pause (insert the resume marker at the closing timestamp — a frozen record never ships a dangling {p} span). 25: per-stream `seq` durable stream key + `_streamMeta{seq,base}`; deletion API (Truncate/PurgeBelow, the ONLY legal stream removal) + StreamGaps integrity check; self-heal seq seed at RegisterStore. 24: singleton-guard the snapshot + CHAT_MSG_SKILL live frames so a LibStub upgrade re-run (embed drift) can't spawn duplicate listeners — the skill-up double-append fix. 23: + "quest" registry type (GECQuest atlas). 22: PurgeThroughBuild (unload sessions/events/markers at-or-before a build). 21: NewSession (atomic Close→Begin for the "New" button). 20: Combine (retrospective typed combine session). 19: PlaceIndex uses GECMap for the place id. 18: RepairOrphans (encapsulate events whose markers were lost). 17: RepairIfDangling reasonOverride. 16: mail+vendor excluded from value. 15: character bound at Begin. 14: Sideline/Restore. 13: + Session module.
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end   -- a newer copy is already loaded
 
@@ -370,6 +370,10 @@ function lib.RegisterStore(opts)
   sv.version = opts.schemaVersion or sv.version or 1
   sv.streams = sv.streams or {}
   sv._gen    = sv._gen    or 0
+  -- `_registry` is an EXPORT-ONLY copy of GECStoreDB.registry (Snapshot writes it at logout so the file on
+  -- disk resolves ch/p standalone). Nothing in-game reads it, and the live GECStoreDB is the truth, so the
+  -- copy loaded from disk is pure weight for the whole session. Drop it here; Snapshot puts a fresh one back.
+  sv._registry = nil
   -- Self-healing seq seed: ensure each stream's meta.seq is at least the highest seq PRESENT, so a lost
   -- _streamMeta (partial SV restore / manual SV surgery) re-derives from the data instead of restarting at
   -- 1 and colliding with already-acked values. Legacy records carry no seq → this yields 0 (harmless).
@@ -416,13 +420,219 @@ function StoreMT:_stampEnvelope()
   return sv._format
 end
 
+-- ===== packed sessions (contract: docs/superpowers/specs/2026-11-11-gecstore-packed-sessions-contract.md) =====
+-- A closed session's stream entries, stored as ONE JSON string instead of thousands of small tables. The
+-- encoding rules below ARE the contract (§3): Uplink decodes these strings and must get exactly the value it
+-- would have read from the unpacked table. Change a rule here only with a PACK_VERSION bump + contract rev.
+lib.PACK_VERSION = 1
+
+local sfmt, sbyte, tconcat, mfloor = string.format, string.byte, table.concat, math.floor
+local JESC = { ['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
+local function jescChar(c) return JESC[c] or sfmt("\\u%04x", sbyte(c)) end
+local function jstr(s) return '"' .. (s:gsub('[%z\1-\31"\\]', jescChar)) .. '"' end
+local TWO53 = 9007199254740992
+local function jnum(n)
+  if n ~= n or n == math.huge or n == -math.huge then return "null" end            -- §3.3 non-finite → null
+  if n == mfloor(n) and n > -TWO53 and n < TWO53 then
+    if n == 0 then return "0" end                                                  -- -0 → 0
+    return sfmt("%.0f", n)                                                         -- §3.3 integral → integer digits
+  end
+  -- §3.3 the SHORTEST of %.15g / %.16g / %.17g that reads back as the identical double (17 always does)
+  local txt = sfmt("%.15g", n)
+  if tonumber(txt) ~= n then txt = sfmt("%.16g", n); if tonumber(txt) ~= n then txt = sfmt("%.17g", n) end end
+  return txt
+end
+
+-- Encode one plain-data value. Returns the JSON text, or nil + reason for anything outside the contract
+-- (a key that is neither a string nor a positive integer in a 1..n run; a function/userdata value).
+local jenc
+jenc = function(v, out, depth)
+  local t = type(v)
+  if t == "string" then out[#out + 1] = jstr(v); return true end
+  if t == "number" then out[#out + 1] = jnum(v); return true end
+  if t == "boolean" then out[#out + 1] = v and "true" or "false"; return true end
+  if t ~= "table" then return nil, "unsupported value type " .. t end
+  if depth > 64 then return nil, "nested too deep" end
+  local count, maxInt, nonSeq = 0, 0, false
+  for k in pairs(v) do
+    count = count + 1
+    if type(k) == "number" and k >= 1 and k == mfloor(k) then
+      if k > maxInt then maxInt = k end
+    elseif type(k) == "string" then nonSeq = true
+    else return nil, "unsupported key type " .. type(k) end
+  end
+  if not nonSeq and maxInt == count then                                           -- §3.2 array (count 0 → [])
+    out[#out + 1] = "["
+    for i = 1, count do
+      if i > 1 then out[#out + 1] = "," end
+      local ok, why = jenc(v[i], out, depth + 1); if not ok then return nil, why end
+    end
+    out[#out + 1] = "]"
+    return true
+  end
+  if maxInt > 0 then return nil, "integer keys mixed with string keys (or a sparse array)" end
+  out[#out + 1] = "{"
+  local first = true
+  for k, x in pairs(v) do
+    if not first then out[#out + 1] = "," end
+    first = false
+    out[#out + 1] = jstr(k); out[#out + 1] = ":"
+    local ok, why = jenc(x, out, depth + 1); if not ok then return nil, why end
+  end
+  out[#out + 1] = "}"
+  return true
+end
+
+function lib.PackEncode(v)
+  local out = {}
+  local ok, why = jenc(v, out, 0)
+  if not ok then return nil, why end
+  return tconcat(out)
+end
+
+-- Decoder (the in-game reader). Strict: anything malformed returns nil + reason, never a partial value.
+local function jdecode(s)
+  local pos, len = 1, #s
+  local function ws() pos = s:find("[^ \t\r\n]", pos) or (len + 1) end
+  local value
+  local function str()
+    local buf, i = {}, pos + 1
+    while true do
+      local j = s:find('["\\]', i)
+      if not j then error("unterminated string") end
+      buf[#buf + 1] = s:sub(i, j - 1)
+      if s:sub(j, j) == '"' then pos = j + 1; return tconcat(buf) end
+      local c = s:sub(j + 1, j + 1)
+      if c == "u" then
+        local cp = tonumber(s:sub(j + 2, j + 5), 16); if not cp then error("bad \\u escape") end
+        if cp < 0x80 then buf[#buf + 1] = string.char(cp)
+        elseif cp < 0x800 then buf[#buf + 1] = string.char(0xC0 + mfloor(cp / 64), 0x80 + cp % 64)
+        else buf[#buf + 1] = string.char(0xE0 + mfloor(cp / 4096), 0x80 + mfloor(cp / 64) % 64, 0x80 + cp % 64) end
+        i = j + 6
+      else
+        local m = ({ ['"'] = '"', ['\\'] = '\\', ['/'] = '/', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t' })[c]
+        if not m then error("bad escape \\" .. c) end
+        buf[#buf + 1] = m; i = j + 2
+      end
+    end
+  end
+  value = function()
+    ws()
+    local c = s:sub(pos, pos)
+    if c == "{" then
+      local o = {}; pos = pos + 1; ws()
+      if s:sub(pos, pos) == "}" then pos = pos + 1; return o end
+      while true do
+        ws(); if s:sub(pos, pos) ~= '"' then error("object key expected at " .. pos) end
+        local k = str(); ws()
+        if s:sub(pos, pos) ~= ":" then error("':' expected at " .. pos) end
+        pos = pos + 1; o[k] = value(); ws()
+        local d = s:sub(pos, pos); pos = pos + 1
+        if d == "}" then return o elseif d ~= "," then error("',' or '}' expected at " .. (pos - 1)) end
+      end
+    elseif c == "[" then
+      local a, n = {}, 0; pos = pos + 1; ws()
+      if s:sub(pos, pos) == "]" then pos = pos + 1; return a end
+      while true do
+        n = n + 1; a[n] = value(); ws()
+        local d = s:sub(pos, pos); pos = pos + 1
+        if d == "]" then return a elseif d ~= "," then error("',' or ']' expected at " .. (pos - 1)) end
+      end
+    elseif c == '"' then return str()
+    elseif s:sub(pos, pos + 3) == "true" then pos = pos + 4; return true
+    elseif s:sub(pos, pos + 4) == "false" then pos = pos + 5; return false
+    elseif s:sub(pos, pos + 3) == "null" then pos = pos + 4; return nil
+    else
+      local a, b = s:find("^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
+      if not a then error("unexpected character at " .. pos) end
+      local n = tonumber(s:sub(a, b)); if not n then error("bad number at " .. a) end
+      pos = b + 1; return n
+    end
+  end
+  local v = value(); ws()
+  if pos <= len then error("trailing data at " .. pos) end
+  return v
+end
+
+function lib.PackDecode(s)
+  if type(s) ~= "string" then return nil, "not a string" end
+  local ok, v = pcall(jdecode, s)
+  if not ok then return nil, v end
+  return v
+end
+
+-- Build one session chunk (§2.2): {"v":1,"sid":...,"n":N,"seq":[first,last],"e":[...entries verbatim...]}.
+function lib.PackChunk(sid, entries)
+  local parts = {}
+  for i = 1, #entries do
+    local js, why = lib.PackEncode(entries[i])
+    if not js then return nil, "entry " .. i .. ": " .. tostring(why) end
+    parts[i] = js
+  end
+  local first, last = entries[1] and entries[1].seq, entries[#entries] and entries[#entries].seq
+  return '{"v":' .. lib.PACK_VERSION .. ',"sid":' .. jstr(sid) .. ',"n":' .. #entries
+    .. ',"seq":[' .. jnum(first or 0) .. ',' .. jnum(last or 0) .. '],"e":[' .. tconcat(parts, ",") .. ']}'
+end
+
+-- Decode a chunk back to { v, sid, n, seq, e }. Verifies n against the decoded entry count.
+function lib.UnpackChunk(s)
+  local c, why = lib.PackDecode(s)
+  if not c then return nil, why end
+  if type(c) ~= "table" or type(c.e) ~= "table" then return nil, "not a chunk" end
+  if c.n ~= #c.e then return nil, "entry count " .. #c.e .. " != n " .. tostring(c.n) end
+  return c
+end
+
+-- Is shadow packing on for this store's SV? Dev-only switch: GECStoreDB.packShadow[<sv name>] = true.
+function lib.PackShadowEnabled(svName)
+  local db = GECStoreDB
+  return db and type(db.packShadow) == "table" and db.packShadow[svName] == true or false
+end
+
+-- SHADOW mode (§4.1): write a packed copy of every CLOSED session's `events` WITHOUT touching the stream, so
+-- the courier can decode both and prove they match before anything is ever removed. Rebuilt from scratch on
+-- each call (a repair may have edited a closed session in place). The open session is never packed.
+function StoreMT:_packShadow()
+  local sv = _G[self._sv]
+  local stream = sv.streams and sv.streams.events
+  local openSid = sv._open and sv._open.sid
+  local bySid, order = {}, {}
+  for i = 1, #(stream or {}) do
+    local e = stream[i]; local sid = e and e.sid
+    if type(sid) == "string" and sid ~= openSid then
+      local b = bySid[sid]
+      if not b then b = {}; bySid[sid] = b; order[#order + 1] = sid end
+      b[#b + 1] = e
+    end
+  end
+  local chunks, skipped, nS, nE = {}, nil, 0, 0
+  for _, sid in ipairs(order) do
+    local c, why = lib.PackChunk(sid, bySid[sid])
+    if c then chunks[sid] = c; nS = nS + 1; nE = nE + #bySid[sid]
+    else skipped = skipped or {}; skipped[sid] = why end
+  end
+  sv.packed = { events = chunks }
+  local fmt = sv._format or self:_stampEnvelope()
+  fmt.packed = { version = lib.PACK_VERSION, encoding = "json", mode = "shadow",
+    streams = { events = { sessions = nS, entries = nE } }, skipped = skipped }
+  return nS, nE
+end
+
 -- Embed a copy of the canonical registry into this store's SV so an exported file is self-contained
 -- (resolves ch/p without the live GECStoreDB) AND stamp the versioned envelope. Call at export time (logout).
+-- With shadow packing on (dev), also writes the packed copy; with it off, removes any earlier shadow copy.
 function StoreMT:Snapshot()
   local db = lib.EnsureDB()
-  _G[self._sv]._registry = deepCopy(db.registry)
+  local sv = _G[self._sv]
+  sv._registry = deepCopy(db.registry)
   self:_stampEnvelope()
-  return _G[self._sv]._registry
+  if lib.PackShadowEnabled(self._sv) then
+    local ok, err = pcall(self._packShadow, self)
+    if not ok then sv.packed = nil; sv._format.packed = { version = lib.PACK_VERSION, mode = "shadow", error = tostring(err) } end
+  elseif sv.packed and not (sv._format.packed and sv._format.packed.mode == "primary") then
+    sv.packed = nil   -- shadow switched off: drop the copy (it was only ever a duplicate)
+  end
+  return sv._registry
 end
 
 -- ===== display layer (single render path; color injected so the data core stays pure) =====

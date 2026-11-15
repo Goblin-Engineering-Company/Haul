@@ -1971,6 +1971,27 @@ end
 ZERO_VALUES_REPAIR.run = ns.RepairZeroValues
 ns.RegisterDataRepair(ZERO_VALUES_REPAIR)
 
+-- REBUILD CACHE. ComputeStats runs every second while tracking (window ticker + the LDB feed), and the
+-- Replay.Rebuild below is a full pass over the session log: thousands of fresh tables a second on a long
+-- run, re-deriving a structure that only changes when the log, the markers, or the tracking state does.
+-- The result is cached against exactly those inputs; pricing (EvalItem) and elapsed time stay live below.
+-- ns._statsGen is bumped by every event-driven ns.RefreshUI (Window.lua), so any in-place mutation that
+-- repaints (exclude/keep, repairs, pause edits) also invalidates. HaulDB.statsCache = false turns it off.
+local rebuildKey, rebuildVal
+ns._statsGen = 0
+local function SessionRebuild(s)
+  local ms = HaulData and HaulData.streams and HaulData.streams.markers
+  local key = HaulDB.statsCache ~= false and table.concat({ tostring(s.log), #s.log, ms and #ms or 0,
+    tostring(ns.IsTracking()), tostring(HaulDB.countPausedByDefault), ns._statsGen }, "|") or nil
+  if key and key == rebuildKey then return rebuildVal end
+  local r = ns.Replay.Rebuild(s.log, {
+    markers = (s.sid and ns.SidMarkers) and ns.SidMarkers(s.sid) or nil,   -- pause windows (spec §5.3 exclusion)
+    countPaused = HaulDB.countPausedByDefault,
+  })
+  rebuildKey, rebuildVal = key, r
+  return r
+end
+
 -- Returns the live computed session stats + sorted item rows (Collection view).
 function ns.ComputeStats()
   local s = ns.session
@@ -1980,10 +2001,7 @@ function ns.ComputeStats()
   -- STRUCTURE comes from the session log (the single source of truth) via Replay; the ACTIVE session
   -- prices it LIVE here (EvalItem). The one-off `keep` (mail/craft include) is overlay state on the
   -- session cache (s.items / s.mailGoldLog), looked up by key/seq — everything else is rebuilt.
-  local rebuilt = (s and s.log and ns.Replay and ns.Replay.Rebuild(s.log, {
-    markers = (s.sid and ns.SidMarkers) and ns.SidMarkers(s.sid) or nil,   -- pause windows (spec §5.3 exclusion)
-    countPaused = HaulDB.countPausedByDefault,
-  })) or { items = {}, mailGoldLog = {} }
+  local rebuilt = (s and s.log and ns.Replay and SessionRebuild(s)) or { items = {}, mailGoldLog = {} }
   local sItems = (s and s.items) or {}
   for _, e in ipairs(rebuilt.items) do
     local id = e.id
@@ -2830,46 +2848,6 @@ function ns.ApplyKeybinds()
   HaulDB.keybinds = nil   -- migrated — native bindings own these now
 end
 
------------------------------------------------------------------ JSON mirror --
--- Minimal JSON encoder so HaulState can be read back without a Lua parser.
-local function jsonEncode(v)
-  local t = type(v)
-  if t == "string" then
-    return '"' .. v:gsub('[%z\1-\31\\"]', function(c)
-      local m = { ['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n',
-                  ['\r'] = '\\r', ['\t'] = '\\t' }
-      return m[c] or string.format('\\u%04x', c:byte())
-    end) .. '"'
-  elseif t == "number" then return (v == v and v ~= math.huge and tostring(v)) or "0"
-  elseif t == "boolean" then return tostring(v)
-  elseif t == "table" then
-    local parts = {}
-    if #v > 0 then
-      for _, e in ipairs(v) do parts[#parts + 1] = jsonEncode(e) end
-      return "[" .. table.concat(parts, ",") .. "]"
-    else
-      for k, val in pairs(v) do
-        parts[#parts + 1] = jsonEncode(tostring(k)) .. ":" .. jsonEncode(val)
-      end
-      return "{" .. table.concat(parts, ",") .. "}"
-    end
-  end
-  return "null"
-end
-
-local function WriteState()
-  local snap = SnapshotSession()
-  HaulState = {
-    version = Haul.BUILD, account = true,
-    char = (UnitName and UnitName("player")) or "?",
-    realm = (GetRealmName and GetRealmName()) or "?",
-    session = snap, history = HaulDB.history,
-    settings = ns.ExportTable and ns.ExportTable() or nil,  -- editable config (same shape as Export)
-    json = jsonEncode({ session = snap }),
-  }
-end
-ns.WriteState = WriteState
-
 --------------------------------------------------------------------- events --
 -- True when we're inside instanced content. IsInInstance covers dungeons/raids;
 -- delves run on the scenario system and may not report there right away, so an
@@ -3240,9 +3218,8 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
     -- Instance boundaries are handled by the instance trigger; otherwise check zone-tier triggers.
     if not CheckInstanceTransition() then ns.CheckZoneTransition() end
   elseif event == "PLAYER_LOGOUT" then
-    -- persist the live session (so /reload & relog resume it) + state mirror
+    -- persist the live session (so /reload & relog resume it)
     SaveLive()
-    WriteState()
   end
 end)
 
