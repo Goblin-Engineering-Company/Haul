@@ -1,7 +1,7 @@
 -- GECReader-1.0 — the single getter layer for GEC addons: the ONLY code that touches Blizzard APIs.
 -- Current.* = live/transient reads; Resolve.* = stable id-keyed reads. The raw WoW calls live in the
 -- injectable _adapter (mocked in tests); the facade below does the assembly + profiling + secret handling.
-local MAJOR, MINOR = "GECReader-1.0", 12
+local MAJOR, MINOR = "GECReader-1.0", 13
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end
 GECReader = lib
@@ -210,6 +210,9 @@ end
 lib._skillUpFormat = nil  -- test seam; live code sets it from ERR_SKILL_UP_SI
 function lib.ParseSkillIncrease(msg)
   if type(msg) ~= "string" then return nil end
+  -- WoW 12 secret chat (MINOR 13): a secret msg still reports type "string", but :match on it
+  -- errors under addon taint. Skip it; the next journal open re-reads the real level anyway.
+  if lib._isSecret(msg) then return nil end
   local fmt = lib._skillUpFormat or ERR_SKILL_UP_SI  -- luacheck: globals ERR_SKILL_UP_SI
   if not fmt then return nil end
   -- escape magic chars, then restore the %s / %d capture groups

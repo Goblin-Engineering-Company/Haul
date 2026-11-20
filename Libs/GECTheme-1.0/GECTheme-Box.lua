@@ -4,7 +4,7 @@
 -- PROPERTIES, never by type. Each box measures its own width AND height and reports both upward, so
 -- nesting is unlimited and no caller ever writes a y-offset or a section height again. The property set
 -- is a deliberate subset of CSS flexbox (dir/gap/pad/grow/basis/align/justify/wrap) so the mental model
--- is one people already know. Spec: docs/superpowers/specs/2026-07-05-gectheme-flow-layout-system-design.md
+-- is one people already know.
 --
 -- The engine attaches its API onto the SAME Theme table LibStub returned for GECTheme-1.0 (loaded just
 -- before this file). It is split out only so the engine is reviewable in isolation.
@@ -433,7 +433,7 @@ end
 -- caller can't wire them wrong.
 local CB_HIT = 24   -- checkbox hit area (the visible box is smaller; matches Theme.Checkbox / Columns:Check)
 
--- A tooltip hover-zone covering the whole row (box + label, per [[tooltips-cover-whole-row]]). `help` is:
+-- A tooltip hover-zone covering the whole row (box + label, so hovering the label works too). `help` is:
 --   * a string -> shown as a plain wrapped block; OR
 --   * a function fn(owner) -> a RENDER FUNCTION that draws its own tooltip (SetOwner/SetText/AddLine/Show,
 --     e.g. an accent title + body) and returns nothing; if it instead returns a string, that string is

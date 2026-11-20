@@ -1,7 +1,7 @@
 -- GECStore-1.0 — shared persistent journal/event store + character/place identity registry
 -- for Goblin Engineering Company WoW addons. Pure logic is headless-testable (luajit); all live-WoW
 -- reads (identity, build stamp, entity resolve, faction standing) are delegated to GECReader-1.0.
-local MAJOR, MINOR = "GECStore-1.0", 30   -- 30: packed sessions, SHADOW mode only (PackEncode/PackDecode/PackChunk/UnpackChunk; Snapshot writes <SV>.packed.events[sid] + _format.packed when GECStoreDB.packShadow[<sv>] is on; the stream is untouched). 29: RegisterStore drops the loaded `_registry` export copy (Snapshot rebuilds it at logout), so the live session no longer holds a second full registry in memory. 28: Session.VerLE exported (the ONE CalVer comparator; build-gated data repairs/purges use it instead of a local copy). 27: Resolve/reduceSegment exclude events INSIDE a pause window from session value (pause = "not the session"; resolution-side, so pause-editing re-includes later). 26: Close/RepairIfDangling SEAL an open pause (insert the resume marker at the closing timestamp — a frozen record never ships a dangling {p} span). 25: per-stream `seq` durable stream key + `_streamMeta{seq,base}`; deletion API (Truncate/PurgeBelow, the ONLY legal stream removal) + StreamGaps integrity check; self-heal seq seed at RegisterStore. 24: singleton-guard the snapshot + CHAT_MSG_SKILL live frames so a LibStub upgrade re-run (embed drift) can't spawn duplicate listeners — the skill-up double-append fix. 23: + "quest" registry type (GECQuest atlas). 22: PurgeThroughBuild (unload sessions/events/markers at-or-before a build). 21: NewSession (atomic Close→Begin for the "New" button). 20: Combine (retrospective typed combine session). 19: PlaceIndex uses GECMap for the place id. 18: RepairOrphans (encapsulate events whose markers were lost). 17: RepairIfDangling reasonOverride. 16: mail+vendor excluded from value. 15: character bound at Begin. 14: Sideline/Restore. 13: + Session module.
+local MAJOR, MINOR = "GECStore-1.0", 31   -- 31: Snapshot keeps any packed data not marked "shadow" (reads the mode before the restamp) and shadow never packs a sidelined session. 30: packed sessions, SHADOW mode only (PackEncode/PackDecode/PackChunk/UnpackChunk; Snapshot writes <SV>.packed.events[sid] + _format.packed when GECStoreDB.packShadow[<sv>] is on; the stream is untouched). 29: RegisterStore drops the loaded `_registry` export copy (Snapshot rebuilds it at logout), so the live session no longer holds a second full registry in memory. 28: Session.VerLE exported (the ONE CalVer comparator; build-gated data repairs/purges use it instead of a local copy). 27: Resolve/reduceSegment exclude events INSIDE a pause window from session value (pause = "not the session"; resolution-side, so pause-editing re-includes later). 26: Close/RepairIfDangling SEAL an open pause (insert the resume marker at the closing timestamp — a frozen record never ships a dangling {p} span). 25: per-stream `seq` durable stream key + `_streamMeta{seq,base}`; deletion API (Truncate/PurgeBelow, the ONLY legal stream removal) + StreamGaps integrity check; self-heal seq seed at RegisterStore. 24: singleton-guard the snapshot + CHAT_MSG_SKILL live frames so a LibStub upgrade re-run (embed drift) can't spawn duplicate listeners — the skill-up double-append fix. 23: + "quest" registry type (GECQuest atlas). 22: PurgeThroughBuild (unload sessions/events/markers at-or-before a build). 21: NewSession (atomic Close→Begin for the "New" button). 20: Combine (retrospective typed combine session). 19: PlaceIndex uses GECMap for the place id. 18: RepairOrphans (encapsulate events whose markers were lost). 17: RepairIfDangling reasonOverride. 16: mail+vendor excluded from value. 15: character bound at Begin. 14: Sideline/Restore. 13: + Session module.
 local lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not lib then return end   -- a newer copy is already loaded
 
@@ -420,7 +420,7 @@ function StoreMT:_stampEnvelope()
   return sv._format
 end
 
--- ===== packed sessions (contract: docs/superpowers/specs/2026-11-11-gecstore-packed-sessions-contract.md) =====
+-- ===== packed sessions (the packed-sessions data contract) =====
 -- A closed session's stream entries, stored as ONE JSON string instead of thousands of small tables. The
 -- encoding rules below ARE the contract (§3): Uplink decodes these strings and must get exactly the value it
 -- would have read from the unpacked table. Change a rule here only with a PACK_VERSION bump + contract rev.
@@ -583,23 +583,25 @@ function lib.UnpackChunk(s)
   return c
 end
 
--- Is shadow packing on for this store's SV? Dev-only switch: GECStoreDB.packShadow[<sv name>] = true.
+-- Is shadow packing on for this store's SV? Off unless explicitly enabled; not a player setting.
 function lib.PackShadowEnabled(svName)
   local db = GECStoreDB
   return db and type(db.packShadow) == "table" and db.packShadow[svName] == true or false
 end
 
 -- SHADOW mode (§4.1): write a packed copy of every CLOSED session's `events` WITHOUT touching the stream, so
--- the courier can decode both and prove they match before anything is ever removed. Rebuilt from scratch on
--- each call (a repair may have edited a closed session in place). The open session is never packed.
+-- a reader can decode both and prove they match before anything is ever removed. Rebuilt from scratch on
+-- each call (a repair may have edited a closed session in place). The open session is never packed, and
+-- neither is a sidelined one (parked, not closed: it resumes and keeps appending).
 function StoreMT:_packShadow()
   local sv = _G[self._sv]
   local stream = sv.streams and sv.streams.events
   local openSid = sv._open and sv._open.sid
+  local parkedSid = sv._sidelined and sv._sidelined.sid
   local bySid, order = {}, {}
   for i = 1, #(stream or {}) do
     local e = stream[i]; local sid = e and e.sid
-    if type(sid) == "string" and sid ~= openSid then
+    if type(sid) == "string" and sid ~= openSid and sid ~= parkedSid then
       local b = bySid[sid]
       if not b then b = {}; bySid[sid] = b; order[#order + 1] = sid end
       b[#b + 1] = e
@@ -625,11 +627,19 @@ function StoreMT:Snapshot()
   local db = lib.EnsureDB()
   local sv = _G[self._sv]
   sv._registry = deepCopy(db.registry)
+  -- Read the packed mode BEFORE the restamp: _stampEnvelope rebuilds _format without `packed` (MINOR 31 fix;
+  -- reading it after made the keep-guard dead). Only a copy positively marked "shadow" is a duplicate. Any
+  -- other packed data (primary, or a mode a newer build wrote) may be the ONLY copy of those sessions: keep
+  -- it and its envelope untouched, and never rebuild it from the stream.
+  local prevPacked = sv._format and sv._format.packed
   self:_stampEnvelope()
-  if lib.PackShadowEnabled(self._sv) then
+  local isShadowCopy = type(prevPacked) == "table" and prevPacked.mode == "shadow"
+  if sv.packed ~= nil and not isShadowCopy then
+    sv._format.packed = prevPacked
+  elseif lib.PackShadowEnabled(self._sv) then
     local ok, err = pcall(self._packShadow, self)
     if not ok then sv.packed = nil; sv._format.packed = { version = lib.PACK_VERSION, mode = "shadow", error = tostring(err) } end
-  elseif sv.packed and not (sv._format.packed and sv._format.packed.mode == "primary") then
+  elseif sv.packed then
     sv.packed = nil   -- shadow switched off: drop the copy (it was only ever a duplicate)
   end
   return sv._registry

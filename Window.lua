@@ -1182,8 +1182,7 @@ local function fmtRow(r)
   return "-"
 end
 -- (Multi-item {<cat>.last.list} / {<cat>.last.cycle} rendering was removed — that presentation belongs
---  in the template engine, not here; see docs/superpowers/specs/2026-07-29-gectemplate-parameterized-
---  presentation-design.md. fmtRow above stays: it still formats each {<cat>.last} composite.)
+--  in the template engine, not here. fmtRow above stays: it still formats each {<cat>.last} composite.)
 
 -------------------------------------------------------------- template render --
 -- Build the token table once per refresh; shared by the main bar AND watchers.
@@ -1530,7 +1529,7 @@ function ns.BuildFields()
       fields["skill.last"] = fmtRow(r)
     end
     -- ({<cat>.last.list} and {<cat>.last.cycle} were removed — multi-item presentation moves to the
-    --  template engine per docs/superpowers/specs/2026-07-29-gectemplate-parameterized-presentation-design.md.)
+    --  template engine.)
     -- ---- universal {last}: most recent USER-FACING gain of any kind, formatted by its category ----
     -- Reuses the per-category .last/.perhour fields computed just above — never recomputed here.
     do

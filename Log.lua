@@ -1,5 +1,4 @@
 -- Log.lua — Haul's continuous, append-only event log (the data foundation).
--- See docs/superpowers/specs/2026-06-11-haul-event-log-data-model-design.md
 --
 -- The log is ALWAYS-ON: it records every income event (item / coin / quest / rep)
 -- the moment it happens, regardless of pause/stop state, with full map cascade +

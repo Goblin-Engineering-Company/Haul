@@ -377,7 +377,7 @@ local function hydrate()
   end
 end
 
--- When live-streaming is on, push a titled, formatted block to the GEC-Console Feed page. Dedup: skip a reprint
+-- When live-streaming is on, push a titled, formatted block to a console Feed page, if one is loaded. Dedup: skip a reprint
 -- when this quest+phase's rendered block is byte-identical to the last one we streamed (re-viewing / re-accepting
 -- an already-known quest is quiet), but a block that gained new info (offer→turn-in, new rewards) still streams.
 local function streamPush(heading, r)
@@ -549,7 +549,7 @@ function lib.Get(id) hydrate(); return id and lib._quests[tonumber(id) or id] or
 -- The last quest-dialog NPC we saw (id, name, t), or nil if none is recent.
 function lib.Current() return recentNpc() end
 
--- ---- diagnostics: pretty console output (GEC-Console) ----------------------
+-- ---- diagnostics: pretty chat output ---------------------------------------
 
 local G = "|cffe8c679"   -- brass  (labels)
 local W = "|cffede6d6"   -- ink    (values)
@@ -691,7 +691,7 @@ function lib.Dump()
   if #ids == 0 then print(D .. "  (accept or turn in a quest to populate)" .. R) end
 end
 
--- Live-stream: push each accept/turn-in as a formatted block to the GEC-Console Feed page. Toggle with no
+-- Live-stream: push each accept/turn-in as a formatted block to a console Feed page. Toggle with no
 -- arg, or force with true/false. Soft dependency on GECConsole (does nothing if the console isn't loaded).
 function lib.Stream(on)
   if on == nil then on = not lib._stream end

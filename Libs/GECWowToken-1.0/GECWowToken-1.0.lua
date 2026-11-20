@@ -1,8 +1,7 @@
 -- GECWowToken-1.0 — the WoW Token domain: price, "% of a token", and a price trend, PLUS the one shared
 -- trend DISPLAY so Haul, Gadgets and Megaphone render it identically.
 --
--- This lib now OWNS the token end-to-end (Phase 1 of the service spec:
--- docs/superpowers/specs/2026-07-30-gecwowtoken-service-design.md): it polls C_WowTokenPublic (NO Auction
+-- This lib now OWNS the token end-to-end: it polls C_WowTokenPublic (NO Auction
 -- House, no AH addon), keeps a persisted stock-ticker price history, rolls that up per day, tracks all-time
 -- stats, computes a REAL windowed trend (current vs the reading ~window-ago, not "delta since last read"),
 -- builds a tooltip, and serves the token API. It does NOT graph history yet — that's a later phase.

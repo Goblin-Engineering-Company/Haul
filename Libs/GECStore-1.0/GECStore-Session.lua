@@ -16,12 +16,14 @@ if not lib then return end
 -- newer Session engine with its older methods (the documented "no change" bug class). Only attach when THIS
 -- copy's SESSION_MINOR beats what's stamped, then stamp it — newest wins regardless of addon load order, and
 -- an older copy loading later is a no-op. Bump SESSION_MINOR on every Session change that must supersede copies.
-local SESSION_MINOR = 5   -- 2: export the CalVer comparator as Session.VerLE (one comparator, no per-addon copies)
+local SESSION_MINOR = 6   -- 2: export the CalVer comparator as Session.VerLE (one comparator, no per-addon copies)
                           -- 3: reduceSegment excludes vendor-purchased loot (Session.IsHaulLoot; matches Replay)
                           -- 4: one pause-window pairing (Session.PauseWindows); a pause while already paused is a
                           --    no-op, so Combine-while-paused no longer leaves the first pause open forever
                           -- 5: Resolve flattens nested folds (a Resumed/Merged row later Combined keeps the value of
                           --    what was folded into it); a fold pointing at a missing record is skipped, not a crash
+                          -- 6: Resolve reports `mail` (gold received by mail, outside pauses) per session and per
+                          --    fold segment, its own category like the server's resolver; never in coin/gross/counted
 if lib._sessionMinor and lib._sessionMinor >= SESSION_MINOR then return end
 lib._sessionMinor = SESSION_MINOR
 lib.Session = lib.Session or {}
@@ -78,7 +80,7 @@ local function reduceSegment(data, sid)
     return false
   end
 
-  local byId, coin = {}, 0
+  local byId, coin, mail = {}, 0, 0
   for _, e in ipairs(events) do
     if e.sid == sid and not inPause(e.t) then
       if isHaulLoot(e) then   -- mail-collected and vendor-purchased rows are informational, not haul value
@@ -91,6 +93,8 @@ local function reduceSegment(data, sid)
         it.count = it.count + (e.count or 0)
       elseif MONETARY[e.k] then
         coin = coin + (e.amount or 0)
+      elseif e.k == "mail" and e.amount ~= nil then
+        mail = mail + e.amount   -- all gold received by mail: its OWN category, never in coin/gross/counted
       end
     end
   end
@@ -121,6 +125,7 @@ local function reduceSegment(data, sid)
     coin = coin,
     gross = itemGross + coin,
     counted = itemCounted + coin,
+    mail = mail,
   }
 end
 
@@ -178,16 +183,17 @@ function Session.Resolve(data)
         segs[#segs + 1] = reduceSegment(data, sid)
 
         local builds, seen = {}, {}
-        local gross, counted, coin, active = 0, 0, 0, 0
+        local gross, counted, coin, active, mail = 0, 0, 0, 0, 0
         local exclUnion, exclSeen = {}, {}
         local segOut = {}
         for _, s in ipairs(segs) do
           unionInOrder(builds, data.sessions[s.sid].builds, seen)
           unionInOrder(exclUnion, data.sessions[s.sid].exclusions, exclSeen)
           gross, counted, coin, active = gross + s.gross, counted + s.counted, coin + s.coin, active + s.activeSeconds
+          mail = mail + s.mail
           segOut[#segOut + 1] = {
             sid = s.sid, startedAt = s.startedAt, closedAt = s.closedAt,
-            activeSeconds = s.activeSeconds, gross = s.gross, counted = s.counted, items = s.items,
+            activeSeconds = s.activeSeconds, gross = s.gross, counted = s.counted, mail = s.mail, items = s.items,
           }
         end
         table.sort(exclUnion, function(a, b) return a < b end)
@@ -195,7 +201,7 @@ function Session.Resolve(data)
         out[#out + 1] = {
           sid = sid, character = rec.character, builds = builds,
           startedAt = rec.startedAt, closedAt = rec.closedAt, activeSeconds = active,
-          coin = coin, gross = gross, counted = counted, exclusions = exclUnion,
+          coin = coin, gross = gross, counted = counted, mail = mail, exclusions = exclUnion,
           via = fold.via, foldedFrom = fold.from, segments = segOut,
           closeReason = closeReason[sid],
         }
@@ -208,7 +214,7 @@ function Session.Resolve(data)
           sid = sid, character = rec.character, schemaVersion = rec.schemaVersion,
           builds = rec.builds, gameEnv = rec.gameEnv,
           startedAt = rec.startedAt, closedAt = rec.closedAt, activeSeconds = seg.activeSeconds,
-          coin = seg.coin, gross = seg.gross, counted = seg.counted, exclusions = excl,
+          coin = seg.coin, gross = seg.gross, counted = seg.counted, mail = seg.mail, exclusions = excl,
           items = seg.items, closeReason = closeReason[sid],
         }
       end
